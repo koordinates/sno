@@ -8,6 +8,7 @@ _When adding new entries to the changelog, please include issue/PR numbers where
 
  * `apply` and `import` no longer create empty commits unless you specify `--allow-empty` [#243](https://github.com/koordinates/sno/issues/243), [#245](https://github.com/koordinates/sno/issues/245)
  * Patches that create or delete datasets are now supported in Datasets V2 [#239](https://github.com/koordinates/sno/issues/239)
+ * `apply`, `commit` and `merge` commands now optimise repositories after committing, to avoid poor repo performance. [#250](https://github.com/koordinates/sno/issues/250)
 
 ## 0.5.0
 

@@ -11,6 +11,7 @@ from .conflicts import (
 )
 from .diff import get_repo_diff
 from .exceptions import InvalidOperation
+from .git_util import gc
 from .merge_util import AncestorOursTheirs, MergeIndex, MergeContext
 from .output_util import dump_json_output
 from .repo_files import (
@@ -245,6 +246,7 @@ def complete_merging_state(ctx):
 
     # TODO - support json output
     click.echo(merge_status_to_text(merge_jdict, fresh=True))
+    gc(repo, "--auto", use_subprocess=False)
 
 
 def merge_context_to_text(jdict):
@@ -407,3 +409,5 @@ def merge(ctx, ff, ff_only, dry_run, message, output_format, commit):
         dump_json_output({"sno.merge/v1": jdict}, sys.stdout)
     else:
         click.echo(merge_status_to_text(jdict, fresh=True))
+    if not no_op and not conflicts:
+        gc(repo, "--auto", use_subprocess=False)

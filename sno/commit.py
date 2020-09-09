@@ -15,6 +15,7 @@ from .exceptions import (
     NO_WORKING_COPY,
 )
 from .filter_util import build_feature_filter
+from .git_util import gc
 from .output_util import dump_json_output
 from .repo_files import (
     COMMIT_EDITMSG,
@@ -118,6 +119,8 @@ def commit(ctx, message, allow_empty, output_format, filters):
         dump_json_output(jdict, sys.stdout)
     else:
         click.echo(commit_json_to_text(jdict))
+
+    gc(repo, "--auto", use_subprocess=False)
 
 
 def get_commit_message(repo, diff, draft_message="", quiet=False):

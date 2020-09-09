@@ -393,14 +393,35 @@ class SnoCliRunner(CliRunner):
             if input or env or color:
                 L.warning("PDB un-isolation doesn't work if input/env/color are passed")
             else:
-                return self.isolation_pdb()
+                return self.isolation_pdb(env=env)
 
         return super().isolation(input=input, env=env, color=color)
 
     @contextlib.contextmanager
-    def isolation_pdb(self):
+    def isolation_pdb(self, env=None):
         s = io.BytesIO(b"{stdout not captured because --pdb-trace}")
-        yield (s, not self.mix_stderr and s)
+        old_env = {}
+        env = self.make_env(env)
+        try:
+            for key, value in env.items():
+                old_env[key] = os.environ.get(key)
+                if value is None:
+                    try:
+                        del os.environ[key]
+                    except Exception:
+                        pass
+                else:
+                    os.environ[key] = value
+            yield (s, not self.mix_stderr and s)
+        finally:
+            for key, value in old_env.items():
+                if value is None:
+                    try:
+                        del os.environ[key]
+                    except Exception:
+                        pass
+                else:
+                    os.environ[key] = value
 
 
 @pytest.fixture

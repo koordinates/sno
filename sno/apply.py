@@ -14,6 +14,7 @@ from .exceptions import (
 )
 from .diff_structs import RepoDiff, DeltaDiff, Delta
 from .geometry import hex_wkb_to_gpkg_geom
+from .git_util import gc
 from .schema import Schema
 from .structure import RepositoryStructure
 from .timestamps import iso8601_utc_to_datetime, iso8601_tz_to_timedelta
@@ -224,3 +225,4 @@ def apply(ctx, **kwargs):
     Applies and commits the given JSON patch (as created by `sno show -o json`)
     """
     apply_patch(repo=ctx.obj.repo, **kwargs)
+    gc(ctx.obj.repo, "--auto", use_subprocess=False)

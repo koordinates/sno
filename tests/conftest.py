@@ -109,7 +109,15 @@ def git_user_config(monkeypatch_session, tmp_path_factory, request):
     USER_EMAIL = "sno-tester@example.com"
 
     with open(home / ".gitconfig", "w") as f:
-        f.write(f"[user]\n\tname = {USER_NAME}\n\temail = {USER_EMAIL}\n")
+        f.write(
+            f"[user]\n"
+            f"\tname = {USER_NAME}\n"
+            f"\temail = {USER_EMAIL}\n"
+            # make `gc` syncronous in testing.
+            # otherwise it has race conditions with test teardown.
+            f"[gc]\n"
+            f"\tautoDetach = false"
+        )
 
     L.debug("Temporary HOME for git config: %s", home)
 

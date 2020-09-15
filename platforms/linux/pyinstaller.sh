@@ -14,7 +14,7 @@ tar xzf vendor/dist/vendor-Linux.tar.gz -C "$PYENV_PREFIX" --strip-components=1 
 # get the Rtree installer working successfully
 export SPATIALINDEX_C_LIBRARY="$PYENV_PREFIX/lib/libspatialindex_c.so"
 
-pip install --no-deps --ignore-installed -r requirements.txt
+pip install --no-deps --ignore-installed -r requirements/main.txt
 pip install --no-deps \
     /tmp/wheelhouse/*.whl
 

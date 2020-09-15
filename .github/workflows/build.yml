@@ -100,7 +100,7 @@ jobs:
         uses: actions/cache@v1
         with:
           path: .cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-${{ hashFiles('requirements/*.txt') }}-${{ hashFiles('Makefile') }}
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements/*.txt') }}-${{ hashFiles('Makefile') }}
           restore-keys: |
             pip-${{ runner.os }}-
 
@@ -215,9 +215,9 @@ jobs:
       - name: "app: check for un-compiled dependencies"
         run: |
           make py-requirements
-          git diff requirements.txt requirements/*.txt
+          git diff requirements/*.txt
           # error for runtime dependencies out of sync
-          git diff --exit-code requirements.txt
+          git diff --exit-code requirements/main.txt
 
       - name: "app: unit tests"
         run: |
@@ -381,7 +381,7 @@ jobs:
         uses: actions/cache@v1
         with:
           path: .cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-${{ hashFiles('requirements/*.txt') }}-${{ hashFiles('makefile.vc') }}
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements/*.txt') }}-${{ hashFiles('makefile.vc') }}
           restore-keys: |
             pip-${{ runner.os }}-
 

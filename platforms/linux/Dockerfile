@@ -19,9 +19,9 @@ COPY vendor/env/share/proj/ /venv/share/proj/
 COPY vendor/env/lib/ /venv/lib/
 COPY vendor/env/bin/git /venv/bin/
 
-COPY requirements.txt /src/
+COPY requirements/main.txt /src/
 RUN --mount=type=cache,target=/root/.cache \
-    pip install --no-deps -r requirements.txt
+    pip install --no-deps -r main.txt
 
 COPY vendor/wheelhouse/*-linux_x86_64.whl /src
 RUN pip install --no-deps /src/*.whl

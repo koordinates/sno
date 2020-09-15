@@ -18,7 +18,7 @@ export PREFIX ?= /usr/local
 # Python dependencies via pip-compile
 BASE_PIP_COMPILE_CMD = CUSTOM_COMPILE_COMMAND="make py-requirements" pip-compile -v --annotate --no-index --no-emit-trusted-host --upgrade --allow-unsafe
 PIP_COMPILE_CMD ?= $(BASE_PIP_COMPILE_CMD)
-PY_REQS = requirements.txt requirements/test.txt requirements/dev.txt
+PY_REQS = requirements/main.txt requirements/test.txt requirements/dev.txt
 
 # Native library dependencies
 ifeq ($(PLATFORM),Darwin)
@@ -53,11 +53,11 @@ py-requirements: $(py-install-tools)
 py-requirements-upgrade: export PIP_COMPILE_CMD=$(BASE_PIP_COMPILE_CMD) --upgrade
 py-requirements-upgrade: py-requirements
 
-requirements.txt: requirements/requirements.in requirements/licenses.ini
-requirements/test.txt: requirements/test.in requirements.txt
-requirements/dev.txt: requirements/dev.in requirements.txt requirements/test.txt
+requirements/main.txt: requirements/requirements.in requirements/licenses.ini
+requirements/test.txt: requirements/test.in requirements/main.txt
+requirements/dev.txt: requirements/dev.in requirements/main.txt requirements/test.txt
 
-requirement%.txt requirements/%.txt:
+requirements/%.txt:
 	$(MAKE) $(py-install-tools) $(vendor-install)
 	$(PIP_COMPILE_CMD) --output-file $@ $<
 #   Comment out things we build
@@ -69,7 +69,7 @@ requirement%.txt requirements/%.txt:
 # Python dependency license checking
 .PHONY: py-license-check
 py-license-check: py-deps $(py-install-tools) requirements/licenses.ini
-	liccheck -l CAUTIOUS -s requirements/licenses.ini -r requirements.txt
+	liccheck -l CAUTIOUS -s requirements/licenses.ini -r requirements/main.txt
 
 # Python dependency installation
 
@@ -80,7 +80,7 @@ py-install-tools = $(VIRTUAL_ENV)/.tools.installed
 
 $(PY_REQS) $(py-install-main): export SPATIALINDEX_C_LIBRARY:=$(abspath $(VIRTUAL_ENV)/lib/libspatialindex_c.$(LIBSUFFIX))
 
-$(py-install-main): requirements.txt $(vendor-install)
+$(py-install-main): requirements/main.txt $(vendor-install)
 $(py-install-test): requirements/test.txt $(py-install-main)
 $(py-install-dev): requirements/dev.txt $(py-install-main) $(py-install-test)
 

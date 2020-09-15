@@ -1,4 +1,4 @@
--c ../requirements.txt
+-c requirements/main.txt
 
 pytest
     # pytest 6+ depends on these on windows, but we generally run pip-compile on macOS...

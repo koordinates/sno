@@ -32,7 +32,7 @@ vendor\dist:
 
 venv\.requirements.installed: venv vendor\dist
 	FOR %%F in (vendor\dist\wheelhouse\*.whl) DO pip install --no-deps %F
-	pip install --no-deps -r requirements.txt
+	pip install --no-deps -r requirements\main.txt
 	copy /Y vendor\dist\env\lib\* venv
 	echo "">$@
 

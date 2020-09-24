@@ -54,6 +54,7 @@ jobs:
       PY3_PKG: python-3.7.6-macosx10.9.pkg
       PY3_URL: https://www.python.org/ftp/python/3.7.6/python-3.7.6-macosx10.9.pkg
       HOMEBREW_CACHE: ${{ github.workspace }}/.cache/brew
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
     services: ${{ matrix.platform.services }}
     steps:
       - uses: actions/checkout@v2

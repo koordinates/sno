@@ -570,21 +570,21 @@ class WorkingCopy:
                 f"Structural changes are affecting:\n{structural_changes_text}"
             )
 
-        # Delete old tables
-        if table_deletes:
-            self.drop_table(
-                target_tree_or_commit, *[base_datasets[d] for d in table_deletes]
-            )
-        # Write new tables
-        if table_inserts:
-            # Note: write_full doesn't work if called from within an existing db session.
-            self.write_full(
-                target_tree_or_commit, *[target_datasets[d] for d in table_inserts]
-            )
-
         with self.session(bulk=1) as db:
             dbcur = db.cursor()
+            # Delete old tables
+            if table_deletes:
+                self.drop_table(
+                    target_tree_or_commit, *[base_datasets[d] for d in table_deletes]
+                )
+            # Write new tables
+            if table_inserts:
+                # Note: write_full doesn't work if called from within an existing db session.
+                self.write_full(
+                    target_tree_or_commit, *[target_datasets[d] for d in table_inserts]
+                )
 
+            # Update tables that can be updated in place.
             for table in table_updates:
                 base_ds = base_datasets[table]
                 target_ds = target_datasets[table]

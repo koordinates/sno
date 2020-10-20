@@ -6,6 +6,7 @@ _When adding new entries to the changelog, please include issue/PR numbers where
 
 ## 0.6.1 (UNRELEASED)
 
+ * Improved error recovery: Sno commands now write to the working copy within a single transaction, which is rolled back if the command fails. [#281](https://github.com/koordinates/sno/pull/281)
  * Bugfix - `sno meta set` didn't allow updates to `schema.json`
  * Bugfix - Fixed a potential `KeyError` in `Schema._try_align`
  * Bugfix - Fixed a potential `unexpected NoneType` in `WorkingCopy.is_dirty`

@@ -386,61 +386,45 @@ class WorkingCopy_GPKG(WorkingCopy):
             )
 
     def _delete_meta_metadata(self, table_name, dbcur):
-        dbcur.execute("""PRAGMA defer_foreign_keys = ON""")
         dbcur.execute(
-            """
-            DELETE FROM gpkg_metadata WHERE id IN
-                (SELECT md_file_id FROM gpkg_metadata_reference WHERE table_name = ?);
-            """,
+            """SELECT md_file_id FROM gpkg_metadata_reference WHERE table_name = ?;""",
             (table_name,),
         )
+        ids = [row[0] for row in dbcur]
         dbcur.execute(
             """DELETE FROM gpkg_metadata_reference WHERE table_name = ?;""",
             (table_name,),
         )
+        if ids:
+            dbcur.execute(
+                f"""DELETE FROM gpkg_metadata WHERE id IN ({placeholders(ids)});""",
+                ids,
+            )
 
-    def _create_spatial_index(self, dataset):
+    def _create_spatial_index(self, dbcur, dataset):
         L = logging.getLogger(f"{self.__class__.__qualname__}.write_full")
-
         geom_col = dataset.geom_column_name
 
         # Create the GeoPackage Spatial Index
         t0 = time.monotonic()
-        gdal_ds = gdal.OpenEx(
-            str(self.full_path),
-            gdal.OF_VECTOR | gdal.OF_UPDATE | gdal.OF_VERBOSE_ERROR,
-            ["GPKG"],
-        )
         sql = f"SELECT CreateSpatialIndex({gpkg.param_str(dataset.table_name)}, {gpkg.param_str(geom_col)});"
         L.debug(
             "Creating spatial index for %s.%s: %s", dataset.table_name, geom_col, sql
         )
-        gdal_ds.ExecuteSQL(sql)
-        del gdal_ds
+        dbcur.execute(sql)
         L.info("Created spatial index in %ss", time.monotonic() - t0)
 
-    def _drop_spatial_index(self, dataset):
+    def _drop_spatial_index(self, dbcur, dataset):
         L = logging.getLogger(f"{self.__class__.__qualname__}.write_full")
-
         geom_col = dataset.geom_column_name
 
         # Delete the GeoPackage Spatial Index
         t0 = time.monotonic()
-        gdal_ds = gdal.OpenEx(
-            str(self.full_path),
-            gdal.OF_VECTOR | gdal.OF_UPDATE | gdal.OF_VERBOSE_ERROR,
-            ["GPKG"],
-        )
         sql = f"SELECT DisableSpatialIndex({gpkg.param_str(dataset.table_name)}, {gpkg.param_str(geom_col)});"
         L.debug(
             "Dropping spatial index for %s.%s: %s", dataset.table_name, geom_col, sql
         )
-        try:
-            gdal_ds.ExecuteSQL(sql)
-        except RuntimeError:
-            # no such dataset? nothing to drop.
-            pass
-        del gdal_ds
+        dbcur.execute(sql)
         L.info("Dropped spatial index in %ss", time.monotonic() - t0)
 
     def _drop_triggers(self, dbcur, dataset):
@@ -609,10 +593,11 @@ class WorkingCopy_GPKG(WorkingCopy):
 
         L = logging.getLogger(f"{self.__class__.__qualname__}.write_full")
         with self.session(bulk=(0 if safe else 2)) as db:
+            dbcur = db.cursor()
+
             for dataset in datasets:
                 table = dataset.table_name
 
-                dbcur = db.cursor()
                 self.write_meta(dataset)
 
                 # Create the table
@@ -662,18 +647,10 @@ class WorkingCopy_GPKG(WorkingCopy):
                     "Overall rate: %d features/s", (feat_progress / (t1 - t0 or 0.001))
                 )
 
-        for dataset in datasets:
-            if dataset.has_geometry:
-                self._create_spatial_index(dataset)
-
-        with self.session() as db:
-            dbcur = db.cursor()
-            for dataset in datasets:
-                table = dataset.table_name
+                if dataset.has_geometry:
+                    self._create_spatial_index(dbcur, dataset)
 
                 self.update_gpkg_contents(dataset, change_time)
-
-                # Create triggers
                 self._create_triggers(dbcur, dataset)
 
             dbcur.execute(
@@ -726,7 +703,7 @@ class WorkingCopy_GPKG(WorkingCopy):
             for dataset in datasets:
                 table = dataset.table_name
                 if dataset.has_geometry:
-                    self._drop_spatial_index(dataset)
+                    self._drop_spatial_index(dbcur, dataset)
 
                 dbcur.execute(f"""DROP TABLE IF EXISTS {gpkg.ident(table)};""")
                 self.delete_meta(dataset)

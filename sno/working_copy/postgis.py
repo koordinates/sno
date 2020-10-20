@@ -387,8 +387,9 @@ class WorkingCopy_Postgis(WorkingCopy):
                 )
 
     def write_meta(self, dataset):
-        self.write_meta_title(dataset)
-        self.write_meta_crs(dataset)
+        with self.session():
+            self.write_meta_title(dataset)
+            self.write_meta_crs(dataset)
 
     def write_meta_title(self, dataset):
         """Write the dataset title as a comment on the table."""

@@ -914,3 +914,56 @@ def test_types_roundtrip(data_working_copy, cli_runner):
     with data_working_copy("types2") as (repo_path, wc):
         r = cli_runner.invoke(["diff", "--exit-code"])
         assert r.exit_code == 0, r.stdout
+
+
+def test_reset_transaction(data_working_copy, cli_runner, geopackage, edit_points):
+    with data_working_copy("points2") as (repo_path, wc):
+        db = geopackage(wc)
+        with db:
+            cur = db.cursor()
+            edit_points(cur)
+
+        r = cli_runner.invoke(["status", "--output-format=json"])
+        assert r.exit_code == 0, r
+        changes = json.loads(r.stdout)["sno.status/v1"]["workingCopy"]["changes"]
+        assert changes == {
+            H.POINTS.LAYER: {"feature": {"inserts": 1, "updates": 2, "deletes": 5}}
+        }
+
+        db = geopackage(wc)
+        with db:
+            cur = db.cursor()
+            # This modification makes the gpkg_sno_state table work like normal for reading,
+            # but writing to it will fail due to the CHECK.
+            cur.execute("ALTER TABLE gpkg_sno_state RENAME TO gpkg_sno_state_backup;")
+            cur.execute("SELECT value FROM gpkg_sno_state_backup;")
+            value = cur.fetchone()[0]
+            cur.execute(
+                f"""
+                CREATE TABLE gpkg_sno_state
+                    (table_name TEXT NOT NULL, key TEXT NOT NULL, value TEXT NULL CHECK(value = '{value}'));
+                """
+            )
+            cur.execute(
+                "INSERT INTO gpkg_sno_state SELECT * FROM gpkg_sno_state_backup;"
+            )
+
+        # This should fail and so the entire transaction should be rolled back.
+        # Therefore, the GPKG should remain unchanged with 6 uncommitted changes -
+        # even though the failed write to gpkg_sno_state happens after the changes
+        # are discarded and after working copy is reset to the new commit - all of
+        # that will be rolled back.
+        with pytest.raises(apsw.ConstraintError):
+            r = cli_runner.invoke(["checkout", "HEAD^", "--discard-changes"])
+
+        with db:
+            cur = db.cursor()
+            cur.execute("DROP TABLE IF EXISTS gpkg_sno_state;")
+            cur.execute("ALTER TABLE gpkg_sno_state_backup RENAME TO gpkg_sno_state;")
+
+        r = cli_runner.invoke(["status", "--output-format=json"])
+        assert r.exit_code == 0, r
+        changes = json.loads(r.stdout)["sno.status/v1"]["workingCopy"]["changes"]
+        assert changes == {
+            H.POINTS.LAYER: {"feature": {"inserts": 1, "updates": 2, "deletes": 5}}
+        }

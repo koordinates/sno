@@ -10,6 +10,7 @@ jobs:
   posix:
     name: ${{ matrix.platform.name }}
     runs-on: ${{ matrix.platform.os }}
+
     strategy:
       fail-fast: false
       matrix:
@@ -33,13 +34,27 @@ jobs:
             os: macos-latest
             package-formats: pkg
             services: {}
-    if: "startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/master' || !contains(github.event.head_commit.message, '[ci only windows]')"
+    # We want to run on external PRs, but not on our own internal PRs as they'll be run
+    # by the push to the branch.
+    # https://github.community/t/duplicate-checks-on-push-and-pull-request-simultaneous-event/18012/7
+    # Skip Linux/macOS builds with `[ci only windows]` unless it's master or a release tag.
+    if: >
+      (
+        github.event_name == 'push'
+        || github.event.pull_request.head.repo.full_name != github.repository
+      ) && (
+        startsWith(github.ref, 'refs/tags/v')
+        || github.ref == 'refs/heads/master'
+        || !contains(github.event.head_commit.message, '[ci only windows]')
+      )
+
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_COMPRESS: "1"
       PY3_PKG: python-3.7.6-macosx10.9.pkg
       PY3_URL: https://www.python.org/ftp/python/3.7.6/python-3.7.6-macosx10.9.pkg
       HOMEBREW_CACHE: ${{ github.workspace }}/.cache/brew
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
     services: ${{ matrix.platform.services }}
     steps:
       - uses: actions/checkout@v2
@@ -121,7 +136,7 @@ jobs:
       - name: "🍎 prerequisites"
         if: runner.os == 'macOS'
         run: |
-          brew update
+          brew update-reset
           sudo installer -pkg .cache/pydist/${{ env.PY3_PKG }} -dumplog -target /
           brew install ccache pkg-config sqlite3 pandoc
           brew cask install Packages
@@ -157,7 +172,14 @@ jobs:
       - name: "app: version"
         id: version
         run: |
-          if [[ "${{ github.repository }}" == "koordinates/sno" ]] && [[ "${{ github.ref }}" =~ ^refs/tags/v(.*) ]]; then
+          if [[ '${{ github.repository }}' != 'koordinates/sno' ]]; then
+            IS_FORK=1  # some other repo
+          elif [[ -n '${{ github.event.pull_request.id }}' ]] && [[ '${{ github.event.pull_request.head.repo.full_name }}' != '${{ github.repository }}' ]]; then
+            IS_FORK=1  # pr not on main repo
+          else
+            IS_FORK=0
+          fi
+          if (( ! $IS_FORK )) && [[ '${{ github.ref }}' =~ ^refs/tags/v(.*) ]]; then
             VER="${BASH_REMATCH[1]}"
             IS_RELEASE=1
           else
@@ -166,9 +188,11 @@ jobs:
           fi
           echo "App Version: $VER"
           echo "Is Release? $IS_RELEASE"
+          echo "Is Fork PR? $IS_FORK"
           echo "$VER" > sno/VERSION
           echo "::set-output name=value::$VER"
           echo "::set-output name=is_release::$IS_RELEASE"
+          echo "::set-output name=is_fork::$IS_FORK"
 
       - name: "app: install python dependencies"
         run: |
@@ -191,13 +215,6 @@ jobs:
         run: |
           make py-license-check
 
-      - name: "app: check for un-compiled dependencies"
-        run: |
-          make py-requirements
-          git diff requirements.txt requirements/*.txt
-          # error for runtime dependencies out of sync
-          git diff --exit-code requirements.txt
-
       - name: "app: unit tests"
         run: |
           make ci-test
@@ -214,14 +231,14 @@ jobs:
       - name: "🍎 package: setup app signing certificate"
         id: keychain
         uses: apple-actions/import-codesign-certs@v1
-        if: runner.os == 'macOS' && github.repository == 'koordinates/sno'
+        if: "runner.os == 'macOS' && steps.version.outputs.is_fork == 0"
         with:
           p12-file-base64: ${{ secrets.MACOS_APP_CERT }}
           p12-password: ${{ secrets.MACOS_CERT_PW }}
 
       - name: "🍎 package: setup installer signing certificate"
         uses: apple-actions/import-codesign-certs@v1
-        if: runner.os == 'macOS' && steps.version.outputs.is_release == 1
+        if: "runner.os == 'macOS' && steps.version.outputs.is_release == 1"
         with:
           create-keychain: false
           keychain-password: ${{ steps.keychain.outputs.keychain-password }}
@@ -238,7 +255,7 @@ jobs:
         run: |
           make py-tools
 
-          if [ "${{ github.repository }}" == "koordinates/sno" ]; then
+          if (( ! ${{ steps.version.outputs.is_fork }} )); then
             export CODESIGN="${{ secrets.MACOS_CODESIGN_ID }}"
           fi
 
@@ -312,7 +329,7 @@ jobs:
 
       - name: release
         uses: softprops/action-gh-release@v1
-        if: "github.repository == 'koordinates/sno' && steps.version.outputs.is_release == 1"
+        if: "steps.version.outputs.is_release == 1"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -325,7 +342,19 @@ jobs:
   windows:
     name: Windows
     runs-on: windows-2016
-    if: "startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/master' || !contains(github.event.head_commit.message, '[ci only posix]')"
+    # We want to run on external PRs, but not on our own internal PRs as they'll be run
+    # by the push to the branch.
+    # https://github.community/t/duplicate-checks-on-push-and-pull-request-simultaneous-event/18012/7
+    # Skip Windows builds with `[ci only posix]` unless it's master or a release tag.
+    if: >
+      (
+        github.event_name == 'push'
+        || github.event.pull_request.head.repo.full_name != github.repository
+      ) && (
+        startsWith(github.ref, 'refs/tags/v')
+        || github.ref == 'refs/heads/master'
+        || !contains(github.event.head_commit.message, '[ci only posix]')
+      )
     steps:
       - name: "msvc setup"
         uses: ilammy/msvc-dev-cmd@v1
@@ -387,7 +416,9 @@ jobs:
       - name: "app: version"
         id: version
         run: |
-          If ('${{ github.ref }}'.StartsWith('refs/tags/v')) {
+          $IS_FORK = ( ('${{ github.repository }}' -ne 'koordinates/sno') -or ( '${{ github.event.pull_request.id }}' -and ( '${{ github.event.pull_request.head.repo.full_name }}' -ne '${{ github.repository }}') ) ) ? 1 : 0
+
+          If ( (-not $IS_FORK) -and ('${{ github.ref }}'.StartsWith('refs/tags/v')) ) {
             $VER='${{ github.ref }}'.Substring(11)
             $IS_RELEASE=1
           } Else {
@@ -400,10 +431,12 @@ jobs:
           echo "App Version: $VER"
           echo "Installer Version: $IVER"
           echo "Is Release? $IS_RELEASE"
+          echo "Is Fork PR? $IS_FORK"
           echo "$VER" > .\sno\VERSION
           echo "::set-output name=value::$VER"
           echo "::set-output name=installer::$IVER"
           echo "::set-output name=is_release::$IS_RELEASE"
+          echo "::set-output name=is_fork::$IS_FORK"
 
       - name: "app: install python dependencies"
         run: |
@@ -446,7 +479,7 @@ jobs:
           SIGN_AZURE_CLIENTID: ${{ secrets.WIN_SIGN_AZURE_CLIENTID }}
           SIGN_AZURE_CLIENTSECRET: ${{ secrets.WIN_SIGN_AZURE_CLIENTSECRET }}
         run: |
-          If ( '${{ github.repository }}' -eq 'koordinates/sno' -and ${{ steps.version.outputs.is_release }} -eq 1 ) {
+          If ( ${{ steps.version.outputs.is_release }} -eq 1 ) {
             dotnet tool install --global AzureSignTool --version 2.0.17
 
             $Env:SIGN_AZURE_CERTIFICATE=$Env:WIN_SIGN_AZURE_CERTIFICATE
@@ -484,7 +517,7 @@ jobs:
 
       - name: release
         uses: softprops/action-gh-release@v1
-        if: "github.repository == 'koordinates/sno' && steps.version.outputs.is_release == 1"
+        if: "steps.version.outputs.is_release == 1"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

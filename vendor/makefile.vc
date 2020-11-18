@@ -1,6 +1,6 @@
 PATH=$(MAKEDIR)\env\Scripts;$(PATH);C:\Program Files\7-zip;
 
-GIT_VER=2.25.1
+GIT_VER=2.29.2
 LIBGIT_REF=v0.99.0
 PYGIT2_REF=ccf4df153c68d4af7d3d0f4f4f9104afc6f38d43
 PYGIT2_VER=1.1.0

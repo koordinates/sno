@@ -245,6 +245,8 @@ class WorkingCopy:
         Returns True if there are uncommitted changes in the working copy,
         or False otherwise.
         """
+        if not self.get_db_tree():
+            return False
         try:
             self.diff_to_tree(raise_if_dirty=True)
             return False

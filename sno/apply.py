@@ -40,12 +40,12 @@ class MetaChangeType(Enum):
     META_UPDATE = auto()
 
 
-def _meta_change_type(ds_diff_dict):
+def _meta_change_type(ds_diff_dict, allow_missing_old_values):
     meta_diff = ds_diff_dict.get("meta", {})
     if not meta_diff:
         return None
     schema_diff = meta_diff.get("schema.json", {})
-    if "+" in schema_diff and "-" not in schema_diff:
+    if "+" in schema_diff and "-" not in schema_diff and not allow_missing_old_values:
         return MetaChangeType.CREATE_DATASET
     elif "-" in schema_diff and "+" not in schema_diff:
         return MetaChangeType.DELETE_DATASET
@@ -129,7 +129,7 @@ def apply_patch(
     repo_diff = RepoDiff()
     for ds_path, ds_diff_dict in json_diff.items():
         dataset = rs.get(ds_path)
-        meta_change_type = _meta_change_type(ds_diff_dict)
+        meta_change_type = _meta_change_type(ds_diff_dict, allow_missing_old_values)
         check_change_supported(
             rs.version, dataset, ds_path, meta_change_type, do_commit
         )

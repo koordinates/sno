@@ -157,9 +157,20 @@ def meta_set(ctx, message, dataset, items):
     if message is None:
         message = f"Update metadata for {dataset}"
 
+    def _parse(key, value):
+        if key.endswith(".json"):
+            try:
+                return json.loads(value)
+            except json.decoder.JSONDecodeError as e:
+                raise click.BadParameter(f"{key} is not valid JSON:\n{e}")
+        else:
+            return value
+
     patch = {
         "sno.diff/v1+hexwkb": {
-            dataset: {"meta": {key: {"+": value} for (key, value) in items}}
+            dataset: {
+                "meta": {key: {"+": _parse(key, value)} for (key, value) in items}
+            }
         },
         "sno.patch/v1": {"message": message},
     }

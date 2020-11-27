@@ -4,6 +4,12 @@ Please note that compatibility for 0.x releases (software or repositories) isn't
 
 _When adding new entries to the changelog, please include issue/PR numbers wherever possible._
 
+## 0.6.1 (UNRELEASED)
+
+ * Bugfix - `sno meta set` didn't allow updates to `schema.json`
+ * Bugfix - Fixed a potential `KeyError` in `Schema._try_align`
+ * Bugfix - Fixed a potential `unexpected NoneType` in `WorkingCopy.is_dirty`
+
 ## 0.6.0
 
 ### Major changes in this release

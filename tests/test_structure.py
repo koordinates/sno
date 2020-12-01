@@ -469,7 +469,7 @@ def test_shp_import_meta(
                 "geometryCRS": "EPSG:4167",
             },
             {"name": "date_adjus", "dataType": "date"},
-            {"name": "survey_ref", "dataType": "text"},
+            {"name": "survey_ref", "dataType": "text", "length": 50},
             {
                 "name": "adjusted_n",
                 "dataType": "integer",

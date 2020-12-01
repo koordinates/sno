@@ -470,33 +470,64 @@ class OgrImportSource(ImportSource):
             ColumnSchema.new_id(), name, "geometry", None, **extra_type_info
         )
 
+    def _should_import_as_numeric(self, ogr_type, ogr_width):
+        if ogr_width == 0:
+            # Note 1: Unfortunately, these three all collide:
+            #    NUMERIC (unqualified) --> ogr.Real(0.0) --> double
+            #    FLOAT --> ogr.Real(0.0) --> double
+            #    DOUBLE PRECISION --> ogr.Real(0.0) --> double
+            # Fixing this collision might be a good reason to move away from OGR
+            # for import processing in the near future.
+            return False
+        else:
+            # This is a fixed-length numeric. OGR turns them into integers/reals,
+            # but it does actually preserve their precision, so we can turn them back.
+            return (
+                (ogr_type == "Real")
+                # when OGR is translating a modern format to a fixed-width format like shapefile,
+                # it turns int32 fields into 'Integer(9.0)' and int64 into 'Integer64(18.0)'
+                # this should generally be interpreted as an int, rather than NUMERIC(9,0)
+                or (ogr_type == "Integer" and ogr_width != 9)
+                or (ogr_type == "Integer64" and ogr_width != 18)
+            )
+
     def _field_to_v2_column_schema(self, fd):
         ogr_type = fd.GetTypeName()
-        ogr_subtype = fd.GetSubType()
-        if ogr_subtype == ogr.OFSTNone:
-            data_type_info = self.OGR_TYPE_TO_V2_SCHEMA_TYPE.get(ogr_type)
-            if data_type_info is None:
-                raise NotYetImplemented(
-                    f"Unsupported column type for import: OGR type={ogr_type}"
-                )
+        ogr_width = fd.GetWidth()
+        if self._should_import_as_numeric(ogr_type, ogr_width):
+            data_type = "numeric"
+            # Note 2: Rather confusingly, OGR's concepts of 'width' and 'precision'
+            # correspond to 'precision' and 'scale' in most other systems, respectively:
+            extra_type_info = {
+                # total number of decimal digits
+                "precision": ogr_width,
+                # total number of decimal digits to the right of the decimal point
+                "scale": fd.GetPrecision(),
+            }
         else:
-            data_type_info = self.OGR_SUBTYPE_TO_V2_SCHEMA_TYPE.get(ogr_subtype)
-            if data_type_info is None:
-                raise NotYetImplemented(
-                    f"Unsupported column type for import: OGR subtype={ogr_subtype}"
-                )
+            ogr_subtype = fd.GetSubType()
+            if ogr_subtype == ogr.OFSTNone:
+                data_type_info = self.OGR_TYPE_TO_V2_SCHEMA_TYPE.get(ogr_type)
+                if data_type_info is None:
+                    raise NotYetImplemented(
+                        f"Unsupported column type for import: OGR type={ogr_type}"
+                    )
+            else:
+                data_type_info = self.OGR_SUBTYPE_TO_V2_SCHEMA_TYPE.get(ogr_subtype)
+                if data_type_info is None:
+                    raise NotYetImplemented(
+                        f"Unsupported column type for import: OGR subtype={ogr_subtype}"
+                    )
 
-        if isinstance(data_type_info, tuple):
-            data_type, size = data_type_info
-            extra_type_info = {"size": size}
-        elif isinstance(data_type_info, str):
-            data_type = data_type_info
-            extra_type_info = {}
+            if isinstance(data_type_info, tuple):
+                data_type, size = data_type_info
+                extra_type_info = {"size": size}
+            elif isinstance(data_type_info, str):
+                data_type = data_type_info
+                extra_type_info = {}
 
-        if data_type in ("text", "blob"):
-            width = fd.GetWidth()
-            if width:
-                extra_type_info["length"] = width
+            if data_type in ("text", "blob") and ogr_width:
+                extra_type_info["length"] = ogr_width
 
         name = fd.GetName()
         pk_index = 0 if name == self.primary_key else None

@@ -413,6 +413,9 @@ class Schema:
             if approximated_types and approximated_types.get(old_type) == new_type:
                 # new_col's type was the best approximation we could manage of old_col's type.
                 new_col["dataType"] = old_col["dataType"]
+                for k in ("scale", "precision"):
+                    if k in old_col:
+                        new_col[k] = old_col[k]
             else:
                 return False
 

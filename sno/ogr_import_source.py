@@ -494,7 +494,8 @@ class OgrImportSource(ImportSource):
     def _field_to_v2_column_schema(self, fd):
         ogr_type = fd.GetTypeName()
         ogr_width = fd.GetWidth()
-        if self._should_import_as_numeric(ogr_type, ogr_width):
+        ogr_subtype = fd.GetSubType()
+        if (not ogr_subtype) and self._should_import_as_numeric(ogr_type, ogr_width):
             data_type = "numeric"
             # Note 2: Rather confusingly, OGR's concepts of 'width' and 'precision'
             # correspond to 'precision' and 'scale' in most other systems, respectively:
@@ -505,7 +506,6 @@ class OgrImportSource(ImportSource):
                 "scale": fd.GetPrecision(),
             }
         else:
-            ogr_subtype = fd.GetSubType()
             if ogr_subtype == ogr.OFSTNone:
                 data_type_info = self.OGR_TYPE_TO_V2_SCHEMA_TYPE.get(ogr_type)
                 if data_type_info is None:

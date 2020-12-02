@@ -10,6 +10,8 @@ _When adding new entries to the changelog, please include issue/PR numbers where
  * Bugfix - `sno meta set` didn't allow updates to `schema.json`
  * Bugfix - Fixed a potential `KeyError` in `Schema._try_align`
  * Bugfix - Fixed a potential `unexpected NoneType` in `WorkingCopy.is_dirty`
+ * Bugfix - imports now preserve fixed-precision numeric types in most situations.
+ * Bugfix - imports now preserve length of text/string fields.
 
 ## 0.6.0
 

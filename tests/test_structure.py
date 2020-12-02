@@ -564,7 +564,7 @@ def _test_postgis_import(
             "geometryCRS": "EPSG:4167",
         },
         {"name": "date_adjusted", "dataType": "timestamp"},
-        {"name": "survey_reference", "dataType": "text"},
+        {"name": "survey_reference", "dataType": "text", "length": 50},
         {
             "name": "adjusted_nodes",
             "dataType": "integer",

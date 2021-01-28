@@ -4,6 +4,7 @@ import click
 import pytest
 
 from sno.diff_output import schema_diff_as_text
+from sno.sqlalchemy import gpkg_engine
 from sno.schema import Schema, ColumnSchema
 
 
@@ -134,10 +135,10 @@ def test_align_schema_type_changed(gen_uuid):
     assert aligned == {"ID": "ID", "col1": "col1"}
 
 
-def edit_points_schema(dbcur):
-    dbcur.execute(f"ALTER TABLE {H.POINTS.LAYER} ADD COLUMN colour TEXT(32);")
+def edit_points_schema(db):
+    db.execute(f"""ALTER TABLE "{H.POINTS.LAYER}" ADD COLUMN "colour" TEXT(32);""")
     INSERT = f"""
-        INSERT INTO {H.POINTS.LAYER} (fid, geom, t50_fid, name_ascii, macronated, name, colour)
+        INSERT INTO "{H.POINTS.LAYER}" (fid, geom, t50_fid, name_ascii, macronated, name, colour)
         VALUES (:fid, GeomFromEWKT(:geom), :t50_fid, :name_ascii, :macronated, :name, :colour);
         """
     RECORD = {
@@ -149,24 +150,24 @@ def edit_points_schema(dbcur):
         "name": "Te Motu-a-kore",
         "colour": "red",
     }
-    dbcur.execute(INSERT, RECORD)
-    assert dbcur.getconnection().changes() == 1
-    dbcur.execute(f"UPDATE {H.POINTS.LAYER} SET name='test' WHERE fid=1;")
-    assert dbcur.getconnection().changes() == 1
-    dbcur.execute(
+    r = db.execute(INSERT, RECORD)
+    assert r.rowcount == 1
+    r = db.execute(f"UPDATE {H.POINTS.LAYER} SET name='test' WHERE fid=1;")
+    assert r.rowcount == 1
+    r = db.execute(
         f"UPDATE {H.POINTS.LAYER} SET name='blue house', colour='blue' WHERE fid=2;"
     )
-    assert dbcur.getconnection().changes() == 1
+    assert r.rowcount == 1
 
 
-def edit_polygons_schema(dbcur):
-    dbcur.execute(f"ALTER TABLE {H.POLYGONS.LAYER} ADD COLUMN colour TEXT(32);")
-    dbcur.execute(
-        f"ALTER TABLE {H.POLYGONS.LAYER} RENAME COLUMN survey_reference TO surv_ref;"
+def edit_polygons_schema(db):
+    db.execute(f"""ALTER TABLE "{H.POLYGONS.LAYER}" ADD COLUMN "colour" TEXT(32);""")
+    db.execute(
+        f"""ALTER TABLE "{H.POLYGONS.LAYER}" RENAME COLUMN "survey_reference" TO "surv_ref";"""
     )
 
     INSERT = f"""
-        INSERT INTO {H.POLYGONS.LAYER} (id, geom, date_adjusted, surv_ref, adjusted_nodes, colour)
+        INSERT INTO "{H.POLYGONS.LAYER}" (id, geom, date_adjusted, surv_ref, adjusted_nodes, colour)
         VALUES (:id, GeomFromEWKT(:geom), :date_adjusted, :surv_ref, :adjusted_nodes, :colour);
         """
     RECORD = {
@@ -178,16 +179,16 @@ def edit_polygons_schema(dbcur):
         "colour": None,
     }
 
-    dbcur.execute(INSERT, RECORD)
-    assert dbcur.getconnection().changes() == 1
-    dbcur.execute(f"UPDATE {H.POLYGONS.LAYER} SET surv_ref='test' WHERE id=1443053;")
-    assert dbcur.getconnection().changes() == 1
-    dbcur.execute(f"UPDATE {H.POLYGONS.LAYER} SET colour='yellow' WHERE id=1452332;")
-    assert dbcur.getconnection().changes() == 1
+    r = db.execute(INSERT, RECORD)
+    assert r.rowcount == 1
+    r = db.execute(f"UPDATE {H.POLYGONS.LAYER} SET surv_ref='test' WHERE id=1443053;")
+    assert r.rowcount == 1
+    r = db.execute(f"UPDATE {H.POLYGONS.LAYER} SET colour='yellow' WHERE id=1452332;")
+    assert r.rowcount == 1
 
 
-def edit_table_schema(dbcur):
-    dbcur.execute(f"ALTER TABLE {H.TABLE.LAYER} ADD COLUMN COLOUR TEXT(32);")
+def edit_table_schema(db):
+    db.execute(f"""ALTER TABLE "{H.TABLE.LAYER}" ADD COLUMN "COLOUR" TEXT(32);""")
 
     INSERT = f"""
         INSERT INTO {H.TABLE.LAYER}
@@ -196,30 +197,29 @@ def edit_table_schema(dbcur):
             (:OBJECTID, :NAME, :STATE_NAME, :STATE_FIPS, :CNTY_FIPS, :FIPS, :AREA, :POP1990, :POP2000, :POP90_SQMI, :Shape_Leng, :Shape_Area, :COLOUR);
         """
 
-    dbcur.execute(INSERT, {**H.TABLE.RECORD, "COLOUR": "blue"})
-    assert dbcur.getconnection().changes() == 1
-    dbcur.execute(f"UPDATE {H.TABLE.LAYER} SET OBJECTID=9998 WHERE OBJECTID=1;")
-    assert dbcur.getconnection().changes() == 1
-    dbcur.execute(f"UPDATE {H.TABLE.LAYER} SET name='test' WHERE OBJECTID=2;")
-    assert dbcur.getconnection().changes() == 1
-    dbcur.execute(f"UPDATE {H.TABLE.LAYER} SET COLOUR='white' WHERE OBJECTID=3;")
+    r = db.execute(INSERT, {**H.TABLE.RECORD, "COLOUR": "blue"})
+    assert r.rowcount == 1
+    r = db.execute(f"UPDATE {H.TABLE.LAYER} SET OBJECTID=9998 WHERE OBJECTID=1;")
+    assert r.rowcount == 1
+    r = db.execute(f"UPDATE {H.TABLE.LAYER} SET name='test' WHERE OBJECTID=2;")
+    assert r.rowcount == 1
+    r = db.execute(f"UPDATE {H.TABLE.LAYER} SET COLOUR='white' WHERE OBJECTID=3;")
+    assert r.rowcount == 1
 
 
 DIFF_OUTPUT_FORMATS = ["text", "geojson", "json"]
 
 
 @pytest.mark.parametrize("output_format", DIFF_OUTPUT_FORMATS)
-def test_edit_schema_points(output_format, data_working_copy, geopackage, cli_runner):
+def test_edit_schema_points(output_format, data_working_copy, cli_runner):
     with data_working_copy("points") as (repo, wc_path):
         # empty
         r = cli_runner.invoke(["diff", "--output-format=text", "--exit-code"])
         assert r.exit_code == 0, r
 
         # make some changes
-        db = geopackage(wc_path)
-        with db:
-            cur = db.cursor()
-            edit_points_schema(cur)
+        with gpkg_engine(wc_path).connect() as db:
+            edit_points_schema(db)
 
         r = cli_runner.invoke(
             ["diff", f"--output-format={output_format}", "--output=-"]
@@ -238,17 +238,15 @@ def test_edit_schema_points(output_format, data_working_copy, geopackage, cli_ru
 
 
 @pytest.mark.parametrize("output_format", DIFF_OUTPUT_FORMATS)
-def test_edit_schema_polygons(output_format, data_working_copy, geopackage, cli_runner):
+def test_edit_schema_polygons(output_format, data_working_copy, cli_runner):
     with data_working_copy("polygons") as (repo, wc_path):
         # empty
         r = cli_runner.invoke(["diff", "--output-format=quiet"])
         assert r.exit_code == 0, r
 
         # make some changes
-        db = geopackage(wc_path)
-        with db:
-            cur = db.cursor()
-            edit_polygons_schema(cur)
+        with gpkg_engine(wc_path).connect() as db:
+            edit_polygons_schema(db)
 
         r = cli_runner.invoke(
             ["diff", f"--output-format={output_format}", "--output=-"]
@@ -267,17 +265,15 @@ def test_edit_schema_polygons(output_format, data_working_copy, geopackage, cli_
 
 
 @pytest.mark.parametrize("output_format", DIFF_OUTPUT_FORMATS)
-def test_edit_schema_table(output_format, data_working_copy, geopackage, cli_runner):
+def test_edit_schema_table(output_format, data_working_copy, cli_runner):
     with data_working_copy("table") as (repo, wc_path):
         # empty
         r = cli_runner.invoke(["diff", "--output-format=quiet"])
         assert r.exit_code == 0, r
 
         # make some changes
-        db = geopackage(wc_path)
-        with db:
-            cur = db.cursor()
-            edit_table_schema(cur)
+        with gpkg_engine(wc_path).connect() as db:
+            edit_table_schema(db)
 
         r = cli_runner.invoke(
             ["diff", f"--output-format={output_format}", "--output=-"]

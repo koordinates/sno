@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from sno.exceptions import NO_TABLE, PATCH_DOES_NOT_APPLY
+from sno.sqlalchemy import gpkg_engine
 from sno.repo import SnoRepo
 
 
@@ -364,13 +365,11 @@ def test_add_and_remove_xml_metadata(data_archive, cli_runner):
 
 def test_apply_with_working_copy(
     data_working_copy,
-    geopackage,
     cli_runner,
 ):
     patch_filename = "updates-only.snopatch"
     message = "Change the Coromandel"
     author = {"name": "Someone", "time": 1561040913, "offset": 60}
-    workingcopy_verify_names = {1095: None}
     with data_working_copy("points") as (repo_dir, wc_path):
         patch_path = patches / patch_filename
         r = cli_runner.invoke(["apply", patch_path])
@@ -391,17 +390,13 @@ def test_apply_with_working_copy(
         assert bits[0] == "Commit"
         assert bits[2] == "Updating"
 
-        db = geopackage(wc_path)
-        with db:
-            cur = db.cursor()
-            ids = f"({','.join(str(x) for x in workingcopy_verify_names.keys())})"
-            cur.execute(
+        with gpkg_engine(wc_path).connect() as db:
+            r = db.execute(
                 f"""
-                SELECT {H.POINTS.LAYER_PK}, name FROM {H.POINTS.LAYER} WHERE {H.POINTS.LAYER_PK} IN {ids};
+                SELECT name FROM {H.POINTS.LAYER} WHERE {H.POINTS.LAYER_PK} = 1095;
                 """
             )
-            names = dict(cur.fetchall())
-            assert names == workingcopy_verify_names
+            assert r.scalar() is None
 
         # Check that the `sno create-patch` output is the same as our original patch file had.
         r = cli_runner.invoke(["create-patch", "HEAD"])
@@ -422,9 +417,7 @@ def test_apply_with_no_working_copy_with_no_commit(data_archive_readonly, cli_ru
         assert "--no-commit requires a working copy" in r.stderr
 
 
-def test_apply_with_working_copy_with_no_commit(
-    data_working_copy, geopackage, cli_runner
-):
+def test_apply_with_working_copy_with_no_commit(data_working_copy, cli_runner):
     patch_filename = "updates-only.snopatch"
     message = "Change the Coromandel"
     with data_working_copy("points") as (repo_dir, wc_path):
@@ -474,9 +467,7 @@ def test_apply_multiple_dataset_patch_roundtrip(data_archive, cli_runner):
 
 
 @pytest.mark.slow
-def test_apply_benchmark(
-    data_working_copy, geopackage, benchmark, cli_runner, monkeypatch
-):
+def test_apply_benchmark(data_working_copy, benchmark, cli_runner, monkeypatch):
     from sno import apply
 
     with data_working_copy("points") as (repo_dir, wc_path):
@@ -485,11 +476,11 @@ def test_apply_benchmark(
         assert r.exit_code == 0, r.stderr
 
         # Generate a large change and commit it
-        db = geopackage(wc_path)
-        cursor = db.cursor()
-        cursor.execute(
-            "UPDATE nz_pa_points_topo_150k SET name = 'bulk_' || Coalesce(name, 'null')"
-        )
+        with gpkg_engine(wc_path).connect() as db:
+            db.execute(
+                "UPDATE nz_pa_points_topo_150k SET name = 'bulk_' || Coalesce(name, 'null')"
+            )
+
         r = cli_runner.invoke(["commit", "-m", "rename everything"])
         assert r.exit_code == 0, r.stderr
 

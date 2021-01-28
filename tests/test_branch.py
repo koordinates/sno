@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 
+from sno.sqlalchemy import gpkg_engine
 from sno.exceptions import NO_REPOSITORY
 
 
@@ -30,7 +31,7 @@ def get_commit_ids(jdict):
 
 
 def test_branches(
-    data_archive, data_working_copy, geopackage, cli_runner, insert, tmp_path, request
+    data_archive, data_working_copy, cli_runner, insert, tmp_path, request
 ):
     with data_working_copy("points") as (path1, wc):
         assert text_branches(cli_runner) == ["* master"]
@@ -74,8 +75,8 @@ def test_branches(
         r = cli_runner.invoke(["remote", "add", "myremote", tmp_path])
         assert r.exit_code == 0, r
 
-        db = geopackage(wc)
-        insert(db)
+        with gpkg_engine(wc).connect() as db:
+            insert(db)
 
         r = cli_runner.invoke(["push", "--set-upstream", "myremote", "master"])
         assert r.exit_code == 0, r

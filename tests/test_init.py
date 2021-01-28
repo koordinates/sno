@@ -3,6 +3,7 @@ import shutil
 
 import pytest
 
+from sno.sqlalchemy import gpkg_engine
 from sno.repo import SnoRepo
 from sno.exceptions import (
     INVALID_OPERATION,
@@ -103,7 +104,7 @@ def test_import_table_with_prompt(data_archive_readonly, tmp_path, cli_runner, c
 
 
 def test_import_table_meta_overrides(
-    data_archive_readonly, tmp_path, cli_runner, chdir, geopackage
+    data_archive_readonly, tmp_path, cli_runner, chdir
 ):
     with data_archive_readonly("gpkg-au-census") as data:
         repo_path = tmp_path / "emptydir"
@@ -135,27 +136,26 @@ def test_import_table_meta_overrides(
 
             repo = SnoRepo(repo_path)
             wc = repo.working_copy
-            db = geopackage(wc.path)
-            cur = db.cursor()
-            title, description = cur.execute(
-                """
-                SELECT c.identifier, c.description
-                FROM gpkg_contents c
-                WHERE c.table_name = 'census2016_sdhca_ot_ced_short'
-                """
-            ).fetchone()
-            assert title == "census2016_sdhca_ot_ced_short: test title"
-            assert description == "test description"
+            with gpkg_engine(wc.path).connect() as db:
+                title, description = db.execute(
+                    """
+                    SELECT c.identifier, c.description
+                    FROM gpkg_contents c
+                    WHERE c.table_name = 'census2016_sdhca_ot_ced_short'
+                    """
+                ).fetchone()
+                assert title == "census2016_sdhca_ot_ced_short: test title"
+                assert description == "test description"
 
-            xml_metadata = cur.execute(
-                """
-                SELECT m.metadata
-                FROM gpkg_metadata m JOIN gpkg_metadata_reference r
-                ON m.id = r.md_file_id
-                WHERE r.table_name = 'census2016_sdhca_ot_ced_short'
-                """
-            ).fetchone()[0]
-            assert xml_metadata == original_xml_metadata
+                xml_metadata = db.execute(
+                    """
+                    SELECT m.metadata
+                    FROM gpkg_metadata m JOIN gpkg_metadata_reference r
+                    ON m.id = r.md_file_id
+                    WHERE r.table_name = 'census2016_sdhca_ot_ced_short'
+                    """
+                ).fetchone()[0]
+                assert xml_metadata == original_xml_metadata
 
 
 def test_import_table_with_prompt_with_no_input(
@@ -182,7 +182,6 @@ def test_import_replace_existing(
     tmp_path,
     cli_runner,
     chdir,
-    geopackage,
 ):
     with data_archive("gpkg-polygons") as data:
         repo_path = tmp_path / "emptydir"
@@ -199,11 +198,10 @@ def test_import_replace_existing(
             assert r.exit_code == 0, r.stderr
 
             # Now modify the source GPKG
-            db = geopackage(data / "nz-waca-adjustments.gpkg")
-            dbcur = db.cursor()
-            dbcur.execute(
-                "UPDATE nz_waca_adjustments SET survey_reference = 'edited' WHERE id = 1424927"
-            )
+            with gpkg_engine(data / "nz-waca-adjustments.gpkg").connect() as db:
+                db.execute(
+                    "UPDATE nz_waca_adjustments SET survey_reference = 'edited' WHERE id = 1424927"
+                )
 
             r = cli_runner.invoke(
                 [
@@ -246,7 +244,6 @@ def test_import_replace_existing_with_no_changes(
     tmp_path,
     cli_runner,
     chdir,
-    geopackage,
 ):
     with data_archive("gpkg-polygons") as data:
         repo_path = tmp_path / "emptydir"
@@ -279,7 +276,6 @@ def test_import_replace_existing_with_compatible_schema_changes(
     tmp_path,
     cli_runner,
     chdir,
-    geopackage,
 ):
     with data_archive("gpkg-polygons") as data:
         repo_path = tmp_path / "emptydir"
@@ -299,24 +295,28 @@ def test_import_replace_existing_with_compatible_schema_changes(
             # * doesn't include the `survey_reference` column
             # * has the columns in a different order
             # * has a new column
-            db = geopackage(data / "nz-waca-adjustments.gpkg")
-            dbcur = db.cursor()
-            dbcur.execute(
-                """
-                    CREATE TABLE IF NOT EXISTS "nz_waca_adjustments_2" (
-                        "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
-                        "geom" MULTIPOLYGON,
-                        "date_adjusted" DATETIME,
-                        "adjusted_nodes" MEDIUMINT,
-                        "newcolumn" TEXT
-                    );
-                    INSERT INTO nz_waca_adjustments_2 (id, geom, date_adjusted, adjusted_nodes, newcolumn)
-                        SELECT id, geom, date_adjusted, adjusted_nodes, NULL FROM nz_waca_adjustments
-                    ;
-                    DROP TABLE nz_waca_adjustments;
-                    ALTER TABLE nz_waca_adjustments_2 RENAME TO nz_waca_adjustments;
-                """
-            )
+            with gpkg_engine(data / "nz-waca-adjustments.gpkg").connect() as db:
+                db.execute(
+                    """
+                        CREATE TABLE IF NOT EXISTS "nz_waca_adjustments_2" (
+                            "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                            "geom" MULTIPOLYGON,
+                            "date_adjusted" DATETIME,
+                            "adjusted_nodes" MEDIUMINT,
+                            "newcolumn" TEXT
+                        );
+                    """
+                )
+                db.execute(
+                    """
+                        INSERT INTO nz_waca_adjustments_2 (id, geom, date_adjusted, adjusted_nodes, newcolumn)
+                            SELECT id, geom, date_adjusted, adjusted_nodes, NULL FROM nz_waca_adjustments;
+                    """
+                )
+                db.execute("""DROP TABLE nz_waca_adjustments;""")
+                db.execute(
+                    """ALTER TABLE "nz_waca_adjustments_2" RENAME TO "nz_waca_adjustments";"""
+                )
 
             r = cli_runner.invoke(
                 [
@@ -349,7 +349,6 @@ def test_import_replace_existing_with_column_renames(
     tmp_path,
     cli_runner,
     chdir,
-    geopackage,
 ):
     with data_archive("gpkg-polygons") as data:
         repo_path = tmp_path / "emptydir"
@@ -369,13 +368,12 @@ def test_import_replace_existing_with_column_renames(
             # * doesn't include the `survey_reference` column
             # * has the columns in a different order
             # * has a new column
-            db = geopackage(data / "nz-waca-adjustments.gpkg")
-            dbcur = db.cursor()
-            dbcur.execute(
-                """
-                ALTER TABLE nz_waca_adjustments RENAME COLUMN survey_reference TO renamed_survey_reference;
-                """
-            )
+            with gpkg_engine(data / "nz-waca-adjustments.gpkg").connect() as db:
+                db.execute(
+                    """
+                    ALTER TABLE "nz_waca_adjustments" RENAME COLUMN "survey_reference" TO "renamed_survey_reference";
+                    """
+                )
 
             r = cli_runner.invoke(
                 [
@@ -421,7 +419,7 @@ def test_init_import_table_ogr_types(data_archive_readonly, tmp_path, cli_runner
         wc = repo.working_copy
         with wc.session() as db:
             table_info = [
-                dict(row) for row in db.cursor().execute("PRAGMA table_info('types');")
+                dict(row) for row in db.execute("PRAGMA table_info('types');")
             ]
         assert table_info == [
             {
@@ -533,7 +531,6 @@ def test_init_import(
     tmp_path,
     cli_runner,
     chdir,
-    geopackage,
 ):
     """ Import the GeoPackage (eg. `kx-foo-layer.gpkg`) into a Sno repository. """
     with data_archive(archive) as data:
@@ -570,63 +567,51 @@ def test_init_import(
         assert repo.config["sno.repository.version"] == "2"
         assert repo.config["sno.workingcopy.path"] == f"{wc.name}"
 
-        db = geopackage(wc)
-        assert H.row_count(db, table) > 0
+        with gpkg_engine(wc).connect() as db:
+            assert H.row_count(db, table) > 0
 
-        wc_tree_id = (
-            db.cursor()
-            .execute(
-                f"""SELECT value FROM "gpkg_sno_state" WHERE table_name='*' AND key='tree';"""
-            )
-            .fetchone()[0]
-        )
-        assert wc_tree_id == repo.head_tree.hex
+            wc_tree_id = db.execute(
+                """SELECT value FROM "gpkg_sno_state" WHERE table_name='*' AND key='tree';"""
+            ).fetchone()[0]
+            assert wc_tree_id == repo.head_tree.hex
 
-        xml_metadata = (
-            db.cursor()
-            .execute(
+            xml_metadata = db.execute(
                 f"""
-            SELECT m.metadata
-            FROM gpkg_metadata m JOIN gpkg_metadata_reference r
-            ON m.id = r.md_file_id
-            WHERE r.table_name = '{table}'
-            """
-            )
-            .fetchone()
-        )
-        if table == "nz_pa_points_topo_150k":
-            assert xml_metadata[0].startswith(
-                '<gmd:MD_Metadata xmlns:gco="http://www.isotc211.org/2005/gco"'
-            )
-        elif table == "nz_waca_adjustments":
-            assert xml_metadata[0].startswith(
-                '<GDALMultiDomainMetadata>\n  <Metadata>\n    <MDI key="GPKG_METADATA_ITEM_1">'
-            )
-        else:
-            assert not xml_metadata
+                SELECT m.metadata
+                FROM gpkg_metadata m JOIN gpkg_metadata_reference r
+                ON m.id = r.md_file_id
+                WHERE r.table_name = '{table}'
+                """
+            ).fetchone()
+            if table == "nz_pa_points_topo_150k":
+                assert xml_metadata[0].startswith(
+                    '<gmd:MD_Metadata xmlns:gco="http://www.isotc211.org/2005/gco"'
+                )
+            elif table == "nz_waca_adjustments":
+                assert xml_metadata[0].startswith(
+                    '<GDALMultiDomainMetadata>\n  <Metadata>\n    <MDI key="GPKG_METADATA_ITEM_1">'
+                )
+            else:
+                assert not xml_metadata
 
-        srs_definition = (
-            db.cursor()
-            .execute(
+            srs_definition = db.execute(
                 f"""
-            SELECT srs.definition
-            FROM gpkg_spatial_ref_sys srs JOIN gpkg_geometry_columns geom
-            ON srs.srs_id = geom.srs_id
-            WHERE geom.table_name = '{table}'
-            """
-            )
-            .fetchone()
-        )
-        if table == "nz_pa_points_topo_150k":
-            assert srs_definition[0].startswith(
-                'GEOGCS["WGS 84",\n    DATUM["WGS_1984"'
-            )
-        elif table == "nz_waca_adjustments":
-            assert srs_definition[0].startswith(
-                'GEOGCS["NZGD2000",\n    DATUM["New_Zealand_Geodetic_Datum_2000"'
-            )
+                SELECT srs.definition
+                FROM gpkg_spatial_ref_sys srs JOIN gpkg_geometry_columns geom
+                ON srs.srs_id = geom.srs_id
+                WHERE geom.table_name = '{table}'
+                """
+            ).fetchone()
+            if table == "nz_pa_points_topo_150k":
+                assert srs_definition[0].startswith(
+                    'GEOGCS["WGS 84",\n    DATUM["WGS_1984"'
+                )
+            elif table == "nz_waca_adjustments":
+                assert srs_definition[0].startswith(
+                    'GEOGCS["NZGD2000",\n    DATUM["New_Zealand_Geodetic_Datum_2000"'
+                )
 
-        H.verify_gpkg_extent(db, table)
+            H.verify_gpkg_extent(db, table)
         with chdir(repo_path):
             # check that we can view the commit we created
             cli_runner.invoke(["show", "-o", "json"])
@@ -637,7 +622,6 @@ def test_init_import_commit_headers(
     tmp_path,
     cli_runner,
     chdir,
-    geopackage,
 ):
     with data_archive("gpkg-points") as data:
         repo_path = tmp_path / "data.sno"
@@ -682,7 +666,7 @@ def test_init_import_commit_headers(
         }
 
 
-def test_init_import_name_clash(data_archive, cli_runner, geopackage):
+def test_init_import_name_clash(data_archive, cli_runner):
     """ Import the GeoPackage into a Sno repository of the same name, and checkout a working copy of the same name. """
     with data_archive("gpkg-editing") as data:
         r = cli_runner.invoke(["init", "--import", f"GPKG:editing.gpkg", "editing"])
@@ -703,23 +687,21 @@ def test_init_import_name_clash(data_archive, cli_runner, geopackage):
         assert repo.config["sno.repository.version"] == "2"
         assert repo.config["sno.workingcopy.path"] == "editing.gpkg"
 
-        db = geopackage(wc)
-        dbcur = db.cursor()
-        wc_rowcount = H.row_count(db, "editing")
-        assert wc_rowcount > 0
+        with gpkg_engine(wc).connect() as db:
+            wc_rowcount = H.row_count(db, "editing")
+            assert wc_rowcount > 0
 
-        wc_tree_id = dbcur.execute(
-            """SELECT value FROM "gpkg_sno_state" WHERE table_name='*' AND key='tree';"""
-        ).fetchone()[0]
-        assert wc_tree_id == repo.head_tree.hex
+            wc_tree_id = db.execute(
+                """SELECT value FROM "gpkg_sno_state" WHERE table_name='*' AND key='tree';"""
+            ).fetchone()[0]
+            assert wc_tree_id == repo.head_tree.hex
 
         # make sure we haven't stuffed up the original file
-        dbo = geopackage("editing.gpkg")
-        dbocur = dbo.cursor()
-        dbocur.execute("SELECT 1 FROM sqlite_master WHERE name='gpkg_sno_state';")
-        assert dbocur.fetchall() == []
-        source_rowcount = dbocur.execute("SELECT COUNT(*) FROM editing;").fetchone()[0]
-        assert source_rowcount == wc_rowcount
+        with gpkg_engine("editing.gpkg").connect() as dbo:
+            r = dbo.execute("SELECT 1 FROM sqlite_master WHERE name='gpkg_sno_state';")
+            assert not r.fetchone()
+            source_rowcount = dbo.execute("SELECT COUNT(*) FROM editing;").fetchone()[0]
+            assert source_rowcount == wc_rowcount
 
 
 @pytest.mark.slow
@@ -787,7 +769,7 @@ def test_init_empty(tmp_path, cli_runner, chdir):
 
 
 @pytest.mark.slow
-def test_init_import_alt_names(data_archive, tmp_path, cli_runner, chdir, geopackage):
+def test_init_import_alt_names(data_archive, tmp_path, cli_runner, chdir):
     """ Import the GeoPackage (eg. `kx-foo-layer.gpkg`) into a Sno repository. """
     repo_path = tmp_path / "data.sno"
     repo_path.mkdir()
@@ -830,26 +812,27 @@ def test_init_import_alt_names(data_archive, tmp_path, cli_runner, chdir, geopac
 
     with chdir(repo_path):
         # working copy exists
-        db = geopackage("wc.gpkg")
-        dbcur = db.cursor()
+        with gpkg_engine("wc.gpkg").connect() as db:
 
-        expected_tables = set(a[3].replace("/", "__") for a in ARCHIVE_PATHS)
-        db_tables = set(
-            r[0]
-            for r in dbcur.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        )
-        assert expected_tables <= db_tables
-
-        for gpkg_t in (
-            "gpkg_contents",
-            "gpkg_geometry_columns",
-            "gpkg_metadata_reference",
-        ):
-            table_list = set(
+            expected_tables = set(a[3].replace("/", "__") for a in ARCHIVE_PATHS)
+            db_tables = set(
                 r[0]
-                for r in dbcur.execute(f"SELECT DISTINCT table_name FROM {gpkg_t};")
+                for r in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table';"
+                )
             )
-            assert expected_tables >= table_list, gpkg_t
+            assert expected_tables <= db_tables
+
+            for gpkg_t in (
+                "gpkg_contents",
+                "gpkg_geometry_columns",
+                "gpkg_metadata_reference",
+            ):
+                table_list = set(
+                    r[0]
+                    for r in db.execute(f"SELECT DISTINCT table_name FROM {gpkg_t};")
+                )
+                assert expected_tables >= table_list, gpkg_t
 
         r = cli_runner.invoke(["diff"])
         assert r.exit_code == 0, r
@@ -890,7 +873,6 @@ def test_init_import_home_resolve(
 def test_import_existing_wc(
     data_archive,
     data_working_copy,
-    geopackage,
     cli_runner,
     insert,
     tmp_path,
@@ -911,31 +893,19 @@ def test_import_existing_wc(
 
         repo = SnoRepo(repo_path)
         wc = repo.working_copy
-        db = geopackage(wcdb)
-
-        assert H.row_count(db, "nz_waca_adjustments") > 0
-
-        head_tree = repo.head_tree
-        with db:
-            dbcur = db.cursor()
-            dbcur.execute(
-                """SELECT value FROM "gpkg_sno_state" WHERE table_name='*' AND key='tree';"""
-            )
-            wc_tree_id = dbcur.fetchone()[0]
-        assert wc_tree_id == head_tree.hex
-        assert wc.assert_db_tree_match(head_tree)
+        with wc.session() as db:
+            assert H.row_count(db, "nz_waca_adjustments") > 0
+        assert wc.get_db_tree() == repo.head_tree.id.hex
 
         r = cli_runner.invoke(["status"])
         assert r.exit_code == 0, r
         assert r.stdout.splitlines()[-1] == "Nothing to commit, working copy clean"
 
-        with db:
-            dbcur = db.cursor()
-            dbcur.execute(
+        with wc.session() as db:
+            r = db.execute(
                 "DELETE FROM nz_waca_adjustments WHERE rowid IN (SELECT rowid FROM nz_waca_adjustments ORDER BY id LIMIT 10);"
             )
-            dbcur.execute("SELECT changes()")
-            assert dbcur.fetchone()[0] == 10
+            assert r.rowcount == 10
 
         with data_archive("gpkg-polygons") as source_path, chdir(repo_path):
             r = cli_runner.invoke(
@@ -947,17 +917,9 @@ def test_import_existing_wc(
             )
             assert r.exit_code == 0, r
 
-        assert H.row_count(db, "waca2") > 0
-
-        head_tree = repo.head_tree
-        with db:
-            dbcur = db.cursor()
-            dbcur.execute(
-                """SELECT value FROM "gpkg_sno_state" WHERE table_name='*' AND key='tree';"""
-            )
-            wc_tree_id = dbcur.fetchone()[0]
-        assert wc_tree_id == head_tree.hex
-        assert wc.assert_db_tree_match(head_tree)
+        with wc.session() as db:
+            assert H.row_count(db, "waca2") > 0
+        assert wc.get_db_tree() == repo.head_tree.id.hex
 
         r = cli_runner.invoke(["status"])
         assert r.exit_code == 0, r

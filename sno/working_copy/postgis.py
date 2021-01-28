@@ -16,7 +16,6 @@ from .base import WorkingCopy
 from . import postgis_adapter
 from sno import crs_util
 from sno.geometry import Geometry
-from sno.db_util import changes_rowcount
 from sno.exceptions import NotFound, NO_WORKING_COPY
 from sno.filter_util import UNFILTERED
 from sno.schema import Schema
@@ -455,9 +454,9 @@ class WorkingCopy_Postgis(WorkingCopy):
             db.cursor().execute(sql)
         L.info("Created spatial index in %ss", time.monotonic() - t0)
 
-    def _create_triggers(self, dbcur, dataset):
+    def _create_triggers(self, db, dataset):
         pk_field = dataset.primary_key
-        dbcur.execute(
+        db.cursor().execute(
             SQL(
                 """
             CREATE TRIGGER {} AFTER INSERT OR UPDATE OR DELETE ON {}
@@ -472,9 +471,9 @@ class WorkingCopy_Postgis(WorkingCopy):
         )
 
     @contextlib.contextmanager
-    def _suspend_triggers(self, dbcur, dataset):
+    def _suspend_triggers(self, db, dataset):
         table = dataset.table_name
-        dbcur.execute(
+        db.cursor().execute(
             SQL("ALTER TABLE {} DISABLE TRIGGER sno_track").format(
                 self._table_identifier(table),
             )
@@ -483,7 +482,7 @@ class WorkingCopy_Postgis(WorkingCopy):
         try:
             yield
         finally:
-            dbcur.execute(
+            db.cursor().execute(
                 SQL("ALTER TABLE {} ENABLE TRIGGER sno_track").format(
                     self._table_identifier(table),
                 )
@@ -561,7 +560,7 @@ class WorkingCopy_Postgis(WorkingCopy):
                 ):
                     row_tuples = (tuple(row_dict.values()) for row_dict in row_dicts)
                     dbcur.executemany(sql_insert_features, row_tuples)
-                    feat_count += changes_rowcount(dbcur)
+                    feat_count += dbcur.rowcount
 
                     nc = feat_count / CHUNK_SIZE
                     if nc % 5 == 0 or not nc.is_integer():
@@ -583,7 +582,7 @@ class WorkingCopy_Postgis(WorkingCopy):
                     self._create_spatial_index(dataset)
 
                 # Create triggers
-                self._create_triggers(dbcur, dataset)
+                self._create_triggers(db, dataset)
 
             dbcur.execute(
                 SQL(
@@ -596,7 +595,8 @@ class WorkingCopy_Postgis(WorkingCopy):
                 ("*", "tree", commit.peel(pygit2.Tree).hex),
             )
 
-    def write_features(self, dbcur, dataset, pk_iter, *, ignore_missing=False):
+    def write_features(self, db, dataset, pk_iter, *, ignore_missing=False):
+        dbcur = db.cursor()
         pk_field = dataset.primary_key
         col_names = [col.name for col in dataset.schema]
 
@@ -625,11 +625,12 @@ class WorkingCopy_Postgis(WorkingCopy):
         ):
             row_tuples = (tuple(row_dict.values()) for row_dict in row_dicts)
             dbcur.executemany(sql_write_feature, row_tuples)
-            feat_count += changes_rowcount(dbcur)
+            feat_count += dbcur.rowcount
 
         return feat_count
 
-    def delete_features(self, dbcur, dataset, pk_iter):
+    def delete_features(self, db, dataset, pk_iter):
+        dbcur = db.cursor()
         pk_field = dataset.primary_key
 
         sql_del_feature = SQL("DELETE FROM {} WHERE {}=%s;").format(
@@ -640,7 +641,7 @@ class WorkingCopy_Postgis(WorkingCopy):
         CHUNK_SIZE = 10000
         for rows in self._chunk(zip(pk_iter), CHUNK_SIZE):
             dbcur.executemany(sql_del_feature, rows)
-            feat_count += changes_rowcount(dbcur)
+            feat_count += dbcur.rowcount
 
         return feat_count
 
@@ -750,7 +751,17 @@ class WorkingCopy_Postgis(WorkingCopy):
         # This is already handled by register_type
         return g
 
-    def _execute_diff_query(self, dbcur, dataset, feature_filter=None, meta_diff=None):
+    def _execute_dirty_pks_query(self, db, dataset):
+        sql_changed = SQL("SELECT pk FROM {} WHERE table_name=%s;").format(
+            self.TRACKING_TABLE
+        )
+        dbcur = db.cursor()
+        dbcur.execute(sql_changed, (dataset.table_name,))
+        return dbcur.fetchall()
+
+    def _execute_dirty_rows_query(
+        self, db, dataset, feature_filter=None, meta_diff=None
+    ):
         feature_filter = feature_filter or UNFILTERED
         table = dataset.table_name
         pk_field = dataset.schema.pk_columns[0].name
@@ -775,13 +786,9 @@ class WorkingCopy_Postgis(WorkingCopy):
             diff_sql += SQL("\nAND {}.pk IN %s").format(self.TRACKING_TABLE)
             params.append(tuple([str(pk) for pk in feature_filter]))
 
+        dbcur = db.cursor()
         dbcur.execute(diff_sql, params)
-
-    def _execute_dirty_rows_query(self, dbcur, dataset):
-        sql_changed = SQL("SELECT pk FROM {} WHERE table_name=%s;").format(
-            self.TRACKING_TABLE
-        )
-        dbcur.execute(sql_changed, (dataset.table_name,))
+        return dbcur.fetchall()
 
     def reset_tracking_table(self, reset_filter=UNFILTERED):
         reset_filter = reset_filter or UNFILTERED
@@ -816,21 +823,23 @@ class WorkingCopy_Postgis(WorkingCopy):
                         (table, pk_chunk),
                     )
 
-    def _reset_tracking_table_for_dataset(self, dbcur, dataset):
+    def _reset_tracking_table_for_dataset(self, db, dataset):
+        dbcur = db.cursor()
         dbcur.execute(
             SQL("DELETE FROM {} WHERE table_name=%s;").format(self.TRACKING_TABLE),
             (dataset.table_name,),
         )
-        return changes_rowcount(dbcur)
+        return dbcur.rowcount
 
-    def _update_state_table_tree_impl(self, dbcur, tree_id):
+    def _update_state_table_tree_impl(self, db, tree_id):
+        dbcur = db.cursor()
         dbcur.execute(
             SQL("UPDATE {} SET value=%s WHERE table_name='*' AND key='tree';").format(
                 self.STATE_TABLE
             ),
             (tree_id,),
         )
-        return changes_rowcount(dbcur)
+        return dbcur.rowcount
 
     def _is_meta_update_supported(self, dataset_version, meta_diff):
         """
@@ -859,21 +868,21 @@ class WorkingCopy_Postgis(WorkingCopy):
         dt.pop("type_updates")
         return sum(dt.values()) == 0
 
-    def _apply_meta_title(self, dataset, src_value, dest_value, dbcur):
-        dbcur.execute(
+    def _apply_meta_title(self, dataset, src_value, dest_value, db):
+        db.cursor().execute(
             SQL("COMMENT ON TABLE {} IS %s").format(
                 self._table_identifier(dataset.table_name)
             ),
             (dest_value,),
         )
 
-    def _apply_meta_description(self, dataset, src_value, dest_value, dbcur):
+    def _apply_meta_description(self, dataset, src_value, dest_value, db):
         pass  # This is a no-op for postgis
 
-    def _apply_meta_metadata_dataset_json(self, dataset, src_value, dest_value, dbcur):
+    def _apply_meta_metadata_dataset_json(self, dataset, src_value, dest_value, db):
         pass  # This is a no-op for postgis
 
-    def _apply_meta_schema_json(self, dataset, src_value, dest_value, dbcur):
+    def _apply_meta_schema_json(self, dataset, src_value, dest_value, db):
         src_schema = Schema.from_column_dicts(src_value)
         dest_schema = Schema.from_column_dicts(dest_value)
 
@@ -891,7 +900,7 @@ class WorkingCopy_Postgis(WorkingCopy):
         table = dataset.table_name
         for col_id in deletes:
             src_name = src_schema[col_id].name
-            dbcur.execute(
+            db.cursor().execute(
                 SQL("ALTER TABLE {} DROP COLUMN IF EXISTS {};").format(
                     self._table_identifier(table), Identifier(src_name)
                 )
@@ -900,7 +909,7 @@ class WorkingCopy_Postgis(WorkingCopy):
         for col_id in name_updates:
             src_name = src_schema[col_id].name
             dest_name = dest_schema[col_id].name
-            dbcur.execute(
+            db.cursor().execute(
                 SQL("ALTER TABLE {} RENAME COLUMN {} TO {};").format(
                     self._table_identifier(table),
                     Identifier(src_name),
@@ -923,7 +932,7 @@ class WorkingCopy_Postgis(WorkingCopy):
                         )
                         do_write_crs = True
 
-            dbcur.execute(
+            db.cursor().execute(
                 SQL("ALTER TABLE {} ALTER COLUMN {} TYPE {};").format(
                     self._table_identifier(table), Identifier(col.name), dest_type
                 )

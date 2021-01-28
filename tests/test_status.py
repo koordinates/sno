@@ -3,6 +3,7 @@ import subprocess
 
 import pytest
 
+from sno.sqlalchemy import gpkg_engine
 from sno.exceptions import NO_REPOSITORY
 from sno.repo import SnoRepoState
 from sno.structs import CommitWithReference
@@ -33,7 +34,6 @@ def get_commit_ids(jdict):
 def test_status(
     data_archive,
     data_working_copy,
-    geopackage,
     cli_runner,
     insert,
     tmp_path,
@@ -82,8 +82,8 @@ def test_status(
         r = cli_runner.invoke(["remote", "add", "myremote", tmp_path])
         assert r.exit_code == 0, r
 
-        db = geopackage(wc)
-        insert(db)
+        with gpkg_engine(wc).connect() as db:
+            insert(db)
 
         r = cli_runner.invoke(["push", "--set-upstream", "myremote", "master"])
         assert r.exit_code == 0, r
@@ -111,7 +111,7 @@ def test_status(
         }
 
     with data_working_copy("points") as (path2, wc):
-        db = geopackage(wc)
+        engine = gpkg_engine(wc)
 
         r = cli_runner.invoke(["remote", "add", "myremote", tmp_path])
         assert r.exit_code == 0, r
@@ -146,7 +146,8 @@ def test_status(
         }
 
         # local commit
-        insert(db, reset_index=100)
+        with engine.connect() as db:
+            insert(db, reset_index=100)
 
         H.git_graph(request, "post-commit")
 
@@ -203,12 +204,10 @@ def test_status(
         }
 
         # local edits
-        with db:
+        with engine.connect() as db:
             insert(db, commit=False)
-            db.cursor().execute(f"DELETE FROM {H.POINTS.LAYER} WHERE fid <= 2;")
-            db.cursor().execute(
-                f"UPDATE {H.POINTS.LAYER} SET name='test0' WHERE fid <= 5;"
-            )
+            db.execute(f"DELETE FROM {H.POINTS.LAYER} WHERE fid <= 2;")
+            db.execute(f"UPDATE {H.POINTS.LAYER} SET name='test0' WHERE fid <= 5;")
 
         assert text_status(cli_runner) == [
             "On branch master",

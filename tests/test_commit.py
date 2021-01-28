@@ -14,21 +14,11 @@ from sno.exceptions import (
     SCHEMA_VIOLATION,
 )
 from sno.commit import fallback_editor
+from sno.sqlalchemy import gpkg_engine
 from sno.repo import SnoRepo
 
 
 H = pytest.helpers.helpers()
-
-
-def _count_tracking_table_changes(db, working_copy, layer):
-    with db:
-        cur = db.cursor()
-        cur.execute(
-            f"SELECT COUNT(*) FROM {working_copy.TRACKING_TABLE} WHERE table_name=?;",
-            [layer],
-        )
-        change_count = cur.fetchone()[0]
-    return change_count
 
 
 @pytest.mark.parametrize(
@@ -48,7 +38,6 @@ def test_commit(
     layer,
     partial,
     data_working_copy,
-    geopackage,
     cli_runner,
     request,
     edit_points,
@@ -68,20 +57,20 @@ def test_commit(
         assert r.exit_code == 0, r
 
         # make some changes
-        db = geopackage(wc_path)
-        with db:
-            cur = db.cursor()
+        with gpkg_engine(wc_path).connect() as db:
             try:
                 edit_func = locals()[f"edit_{archive}"]
-                pk_del = edit_func(cur)
+                pk_del = edit_func(db)
             except KeyError:
                 raise NotImplementedError(f"No edit_{archive}")
 
         print(f"deleted fid={pk_del}")
 
         repo = SnoRepo(repo_dir)
+        dataset = repo.datasets()[layer]
+
         wc = repo.working_copy
-        original_change_count = _count_tracking_table_changes(db, wc, layer)
+        original_change_count = wc.tracking_changes_count(dataset)
 
         if partial:
             r = cli_runner.invoke(
@@ -99,12 +88,11 @@ def test_commit(
         assert commit.message == "test-commit-1"
         assert time.time() - commit.commit_time < 3
 
-        dataset = repo.datasets()[layer]
         tree = repo.head_tree
         assert dataset.encode_1pk_to_path(pk_del) not in tree
 
         wc.assert_db_tree_match(tree)
-        change_count = _count_tracking_table_changes(db, wc, layer)
+        change_count = wc.tracking_changes_count(dataset)
 
         if partial:
             # All but one change should still be in the tracking table
@@ -139,7 +127,7 @@ def test_tag(data_working_copy, cli_runner):
 
 
 def test_commit_message(
-    data_working_copy, cli_runner, monkeypatch, geopackage, tmp_path, edit_points
+    data_working_copy, cli_runner, monkeypatch, tmp_path, edit_points
 ):
     """ commit message handling """
     editor_in = None
@@ -221,10 +209,8 @@ def test_commit_message(
         # default editor
 
         # make some changes
-        db = geopackage(wc_path)
-        with db:
-            cur = db.cursor()
-            edit_points(cur)
+        with gpkg_engine(wc_path).connect() as db:
+            edit_points(db)
 
         editor_out = "I am a message\n#of hope, and\nof warning\n\t\n"
         r = cli_runner.invoke(["commit"])
@@ -319,16 +305,12 @@ def test_commit_user_info(tmp_path, cli_runner, chdir, data_working_copy):
         assert author.offset == 750
 
 
-def test_commit_schema_violation(cli_runner, data_working_copy, geopackage):
+def test_commit_schema_violation(cli_runner, data_working_copy):
     with data_working_copy("points") as (repo_dir, wc_path):
-        db = geopackage(wc_path)
-        with db:
-            dbcur = db.cursor()
-            dbcur.execute(f"""UPDATE {H.POINTS.LAYER} SET geom="text" WHERE fid=1;""")
-            dbcur.execute(
-                f"UPDATE {H.POINTS.LAYER} SET t50_fid=123456789012 WHERE fid=2;"
-            )
-            dbcur.execute(
+        with gpkg_engine(wc_path).connect() as db:
+            db.execute(f"""UPDATE {H.POINTS.LAYER} SET geom="text" WHERE fid=1;""")
+            db.execute(f"UPDATE {H.POINTS.LAYER} SET t50_fid=123456789012 WHERE fid=2;")
+            db.execute(
                 f"""UPDATE {H.POINTS.LAYER} SET macronated="kinda" WHERE fid=3;"""
             )
 

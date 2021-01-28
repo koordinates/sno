@@ -22,6 +22,7 @@ from .import_source import ImportSource
 from .ogr_util import get_type_value_adapter
 from .output_util import dump_json_output, get_input_mode, InputMode
 from .schema import Schema, ColumnSchema
+from .sqlalchemy import gpkg_engine
 from .utils import ungenerator
 
 
@@ -595,6 +596,13 @@ class ESRIShapefileImportSource(OgrImportSource):
 
 
 class GPKGImportSource(OgrImportSource):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.table:
+            with self.engine.connect() as db:
+                self._gpkg_primary_key = gpkg.pk(db, self.table)
+                self.gpkg_meta_items_obj = gpkg.get_gpkg_meta_items_obj(db, self.table)
+
     @classmethod
     def quote_ident_part(cls, part):
         """
@@ -604,12 +612,8 @@ class GPKGImportSource(OgrImportSource):
 
     @property
     @functools.lru_cache(maxsize=1)
-    def primary_key(self):
-        if self._primary_key:
-            return self._primary_key
-
-        db = gpkg.db(self.ogr_source)
-        return gpkg.pk(db, self.table)
+    def engine(self):
+        return gpkg_engine(self.ogr_source)
 
     @ungenerator(dict)
     def _gpkg_feature_to_sno_feature(self, gpkg_feature):
@@ -619,21 +623,19 @@ class GPKGImportSource(OgrImportSource):
             else:
                 yield key, value
 
+    @property
+    def primary_key(self):
+        return self._primary_key or self._gpkg_primary_key
+
     def features(self):
         """
         Overrides the super implementation for performance reasons
         (it turns out that OGR feature iterators for GPKG are quite slow!)
         """
-        db = gpkg.db(self.ogr_source)
-        dbcur = db.cursor()
-        dbcur.execute(f"SELECT * FROM {self.quote_ident(self.table)};")
-        for gpkg_feature in dbcur:
-            yield self._gpkg_feature_to_sno_feature(gpkg_feature)
-
-    @functools.lru_cache(maxsize=1)
-    def gpkg_meta_items_obj(self):
-        db = gpkg.db(self.ogr_source)
-        return gpkg.get_gpkg_meta_items_obj(db, self.table)
+        with self.engine.connect() as db:
+            r = db.execute(f"SELECT * FROM {self.quote_ident(self.table)};")
+            for gpkg_feature in r:
+                yield self._gpkg_feature_to_sno_feature(gpkg_feature)
 
     def get_v2_metadata_json(self):
         if (
@@ -643,11 +645,11 @@ class GPKGImportSource(OgrImportSource):
             return super().get_v2_metadata_json()
 
         return gpkg_adapter.generate_v2_meta_item(
-            self.gpkg_meta_items_obj(), "metadata/dataset.json"
+            self.gpkg_meta_items_obj, "metadata/dataset.json"
         )
 
     def crs_definitions(self):
-        yield from gpkg_adapter.all_v2_crs_definitions(self.gpkg_meta_items_obj())
+        yield from gpkg_adapter.all_v2_crs_definitions(self.gpkg_meta_items_obj)
 
 
 class PostgreSQLImportSource(OgrImportSource):

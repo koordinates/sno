@@ -4,48 +4,26 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from enum import Enum
 
 import click
 import pygit2
+from sqlalchemy.orm import sessionmaker
 from osgeo import gdal
+
 
 from .base import WorkingCopy
 from sno import gpkg, gpkg_adapter
-from sno.db_util import changes_rowcount
 from sno.filter_util import UNFILTERED
-from sno.geometry import Geometry, normalise_gpkg_geom
+from sno.geometry import normalise_gpkg_geom
 from sno.schema import Schema
+from sno.sqlalchemy import gpkg_engine, insert_command
 
 
 L = logging.getLogger("sno.working_copy.gpkg")
 
 
-class SQLCommand(Enum):
-    INSERT = "INSERT"
-    INSERT_OR_REPLACE = "INSERT OR REPLACE"
-
-
-def placeholders(vals):
-    """Returns '?,?,?,?...' - where the nunber of ? returned is len(vals)"""
-    count = len(vals)
-    assert count > 0
-    return "?" + (",?" * (count - 1))
-
-
-def sql_insert_dict(dbcur, sql_command, table_name, row_dict):
-    """
-    Inserts a row into a database table.
-    sql_command should be a member of SQLCommand (INSERT or INSERT_OR_REPLACE)
-    """
-    keys, values = zip(*row_dict.items())
-    sql = f"""
-        {sql_command.value} INTO {table_name}
-            ({','.join([gpkg.ident(k) for k in keys])})
-        VALUES
-            ({placeholders(keys)});
-    """
-    return dbcur.execute(sql, values)
+def insert_or_replace_command(table_name, col_names):
+    return insert_command(table_name, col_names).prefix_with("OR REPLACE")
 
 
 class WorkingCopy_GPKG(WorkingCopy):
@@ -55,6 +33,8 @@ class WorkingCopy_GPKG(WorkingCopy):
     def __init__(self, repo, path):
         self.repo = repo
         self.path = path
+        self.engine = gpkg_engine(self.full_path)
+        self.sessionmaker = sessionmaker(bind=self.engine)
 
     @classmethod
     def check_valid_path(cls, path):
@@ -73,7 +53,7 @@ class WorkingCopy_GPKG(WorkingCopy):
         n = f"{self.SNO_TABLE_PREFIX}{name}"
         if suffix:
             n += "_" + suffix
-        return gpkg.ident(n)
+        return n
 
     @contextlib.contextmanager
     def session(self, bulk=0):
@@ -89,57 +69,38 @@ class WorkingCopy_GPKG(WorkingCopy):
         """
         L = logging.getLogger(f"{self.__class__.__qualname__}.session")
 
-        if hasattr(self, "_db"):
+        # TODO - look into bulk, locking_mode, journal_mode, synchronous, cache_size
+
+        if hasattr(self, "_session"):
             # inner - reuse
             L.debug(f"session(bulk={bulk}): existing...")
-            with self._db:
-                yield self._db
+            yield self._session
             L.debug(f"session(bulk={bulk}): existing/done")
+
         else:
             L.debug(f"session(bulk={bulk}): new...")
-            self._db = gpkg.db(
-                self.full_path,
-            )
-            dbcur = self._db.cursor()
-
-            if bulk:
-                L.debug("Invoking bulk mode %s", bulk)
-                orig_journal = dbcur.execute("PRAGMA journal_mode;").fetchone()[0]
-                orig_locking = dbcur.execute("PRAGMA locking_mode;").fetchone()[0]
-
-                dbcur.execute("PRAGMA synchronous = OFF;")
-                dbcur.execute("PRAGMA cache_size = -1048576;")  # -KiB => 1GiB
-
-                if bulk >= 2:
-                    dbcur.execute("PRAGMA journal_mode = MEMORY;")
-                    dbcur.execute("PRAGMA locking_mode = EXCLUSIVE;")
 
             try:
-                with self._db:
-                    yield self._db
+                self._session = self.sessionmaker()
+
+                if bulk:
+                    self._session.execute("PRAGMA synchronous = OFF;")
+                    self._session.execute(
+                        "PRAGMA cache_size = -1048576;"
+                    )  # -KiB => 1GiB
+                if bulk >= 2:
+                    self._session.execute("PRAGMA journal_mode = MEMORY;")
+                    self._session.execute("PRAGMA locking_mode = EXCLUSIVE;")
+
+                self._session.execute("BEGIN TRANSACTION;")
+                yield self._session
+                self._session.commit()
             except Exception:
+                self._session.rollback()
                 raise
             finally:
-                if bulk:
-                    L.debug(
-                        "Disabling bulk %s mode (Journal: %s; Locking: %s)",
-                        bulk,
-                        orig_journal,
-                        orig_locking,
-                    )
-                    dbcur.execute("PRAGMA synchronous = ON;")
-                    dbcur.execute("PRAGMA cache_size = -2000;")  # default
-
-                    if bulk >= 2:
-                        dbcur.execute(f"PRAGMA locking_mode = {orig_locking};")
-                        dbcur.execute(
-                            "SELECT name FROM sqlite_master LIMIT 1;"
-                        )  # unlock
-                        dbcur.execute(f"PRAGMA journal_mode = {orig_journal};")
-
-                del dbcur
-                self._db.close()
-                del self._db
+                self._session.close()
+                del self._session
                 L.debug(f"session(bulk={bulk}): new/done")
 
     def delete(self, keep_container_if_possible=False):
@@ -167,14 +128,13 @@ class WorkingCopy_GPKG(WorkingCopy):
         if not self.is_created():
             return False
         with self.session() as db:
-            dbcur = db.cursor()
-            dbcur.execute(
+            r = db.execute(
                 f"""
                 SELECT count(*) FROM sqlite_master
-                WHERE type='table' AND name IN ({self.STATE_TABLE}, {self.TRACKING_TABLE});
+                WHERE type='table' AND name IN ('{self.STATE_TABLE}', '{self.TRACKING_TABLE}');
                 """
             )
-            return dbcur.fetchone()[0] == 2
+            return r.scalar() == 2
 
     def has_data(self):
         """
@@ -183,16 +143,15 @@ class WorkingCopy_GPKG(WorkingCopy):
         if not self.is_created():
             return False
         with self.session() as db:
-            dbcur = db.cursor()
-            dbcur.execute(
+            r = db.execute(
                 f"""
                 SELECT count(*) FROM sqlite_master
                 WHERE type='table'
-                    AND name NOT IN ({self.STATE_TABLE}, {self.TRACKING_TABLE})
+                    AND name NOT IN ('{self.STATE_TABLE}', '{self.TRACKING_TABLE}')
                     AND NAME NOT LIKE 'gpkg%';
                 """
             )
-            return dbcur.fetchone()[0] > 0
+            return r.scalar() > 0
 
     def create_and_initialise(self):
         # GDAL: Create GeoPackage
@@ -202,18 +161,15 @@ class WorkingCopy_GPKG(WorkingCopy):
         del gdal_ds
 
         with self.session() as db:
-            dbcur = db.cursor()
             # Remove placeholder stuff GDAL creates
-            dbcur.execute(
+            db.execute(
                 "DELETE FROM gpkg_geometry_columns WHERE table_name='ogr_empty_table';"
             )
-            dbcur.execute(
-                "DELETE FROM gpkg_contents WHERE table_name='ogr_empty_table';"
-            )
-            dbcur.execute("DROP TABLE IF EXISTS ogr_empty_table;")
+            db.execute("DELETE FROM gpkg_contents WHERE table_name='ogr_empty_table';")
+            db.execute("DROP TABLE IF EXISTS ogr_empty_table;")
 
             # Create metadata tables
-            dbcur.execute(
+            db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS gpkg_metadata (
                     id INTEGER CONSTRAINT m_pk PRIMARY KEY ASC NOT NULL,
@@ -224,7 +180,7 @@ class WorkingCopy_GPKG(WorkingCopy):
                 );
             """
             )
-            dbcur.execute(
+            db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS gpkg_metadata_reference (
                     reference_scope TEXT NOT NULL,
@@ -239,7 +195,7 @@ class WorkingCopy_GPKG(WorkingCopy):
                 );
             """
             )
-            dbcur.execute(
+            db.execute(
                 """
                 CREATE TABLE IF NOT EXISTS gpkg_extensions (
                     table_name TEXT,
@@ -252,7 +208,7 @@ class WorkingCopy_GPKG(WorkingCopy):
                 """
             )
 
-            dbcur.execute(
+            db.execute(
                 f"""
                 CREATE TABLE {self.STATE_TABLE} (
                     table_name TEXT NOT NULL,
@@ -263,7 +219,7 @@ class WorkingCopy_GPKG(WorkingCopy):
             """
             )
 
-            dbcur.execute(
+            db.execute(
                 f"""
                 CREATE TABLE {self.TRACKING_TABLE} (
                     table_name TEXT NOT NULL,
@@ -293,25 +249,24 @@ class WorkingCopy_GPKG(WorkingCopy):
         gpkg_spatial_ref_sys = dataset.get_gpkg_meta_item("gpkg_spatial_ref_sys")
 
         with self.session() as db:
-            dbcur = db.cursor()
             # Update GeoPackage core tables
-            for o in gpkg_spatial_ref_sys:
-                sql_insert_dict(
-                    dbcur, SQLCommand.INSERT_OR_REPLACE, "gpkg_spatial_ref_sys", o
+            if gpkg_spatial_ref_sys:
+                gsrs = gpkg_spatial_ref_sys
+                db.execute(
+                    insert_or_replace_command("gpkg_spatial_ref_sys", gsrs[0].keys()),
+                    gpkg_spatial_ref_sys,
                 )
 
             # our repo copy doesn't include all fields from gpkg_contents
             # but the default value for last_change (now), and NULL for {min_x,max_x,min_y,max_y}
             # should deal with the remaining fields
-            sql_insert_dict(dbcur, SQLCommand.INSERT, "gpkg_contents", gpkg_contents)
+            db.execute(
+                insert_command("gpkg_contents", gpkg_contents.keys()), gpkg_contents
+            )
 
             if gpkg_geometry_columns:
-                sql_insert_dict(
-                    dbcur,
-                    SQLCommand.INSERT,
-                    "gpkg_geometry_columns",
-                    gpkg_geometry_columns,
-                )
+                ggc = gpkg_geometry_columns
+                db.execute(insert_command("gpkg_geometry_columns", ggc.keys()), ggc)
 
             gpkg_metadata = dataset.get_gpkg_meta_item("gpkg_metadata")
             gpkg_metadata_reference = dataset.get_gpkg_meta_item(
@@ -319,11 +274,11 @@ class WorkingCopy_GPKG(WorkingCopy):
             )
             if gpkg_metadata and gpkg_metadata_reference:
                 self._write_meta_metadata(
-                    table_name, gpkg_metadata, gpkg_metadata_reference, dbcur
+                    table_name, gpkg_metadata, gpkg_metadata_reference, db
                 )
 
     def _write_meta_metadata(
-        self, table_name, gpkg_metadata, gpkg_metadata_reference, dbcur
+        self, table_name, gpkg_metadata, gpkg_metadata_reference, db
     ):
         """Populate gpkg_metadata and gpkg_metadata_reference tables."""
         # gpkg_metadata_reference.md_file_id is a foreign key -> gpkg_metadata.id,
@@ -333,8 +288,8 @@ class WorkingCopy_GPKG(WorkingCopy):
             params = dict(row.items())
             params.pop("id")
 
-            sql_insert_dict(dbcur, SQLCommand.INSERT, "gpkg_metadata", params)
-            metadata_id_map[row["id"]] = dbcur.getconnection().last_insert_rowid()
+            r = db.execute(insert_command("gpkg_metadata", params.keys()), params)
+            metadata_id_map[row["id"]] = r.lastrowid
 
         for row in gpkg_metadata_reference:
             params = dict(row.items())
@@ -342,7 +297,9 @@ class WorkingCopy_GPKG(WorkingCopy):
             params["md_parent_id"] = metadata_id_map.get(row["md_parent_id"], None)
             params["table_name"] = table_name
 
-            sql_insert_dict(dbcur, SQLCommand.INSERT, "gpkg_metadata_reference", params)
+            r = db.execute(
+                insert_command("gpkg_metadata_reference", params.keys()), params
+            )
 
     def meta_items(self, dataset):
         """
@@ -421,35 +378,34 @@ class WorkingCopy_GPKG(WorkingCopy):
     def delete_meta(self, dataset):
         table_name = dataset.table_name
         with self.session() as db:
-            dbcur = db.cursor()
-            self._delete_meta_metadata(table_name, dbcur)
+            self._delete_meta_metadata(table_name, db)
             # FOREIGN KEY constraints are still active, so we delete in a particular order:
-            dbcur.execute(
-                """DELETE FROM gpkg_geometry_columns WHERE table_name = ?;""",
-                (dataset.table_name,),
+            db.execute(
+                """DELETE FROM gpkg_geometry_columns WHERE table_name = :table_name;""",
+                {"table_name": dataset.table_name},
             )
-            dbcur.execute(
-                """DELETE FROM gpkg_contents WHERE table_name = ?;""",
-                (dataset.table_name,),
+            db.execute(
+                """DELETE FROM gpkg_contents WHERE table_name = :table_name;""",
+                {"table_name": dataset.table_name},
             )
 
-    def _delete_meta_metadata(self, table_name, dbcur):
-        dbcur.execute(
-            """SELECT md_file_id FROM gpkg_metadata_reference WHERE table_name = ?;""",
-            (table_name,),
+    def _delete_meta_metadata(self, table_name, db):
+        r = db.execute(
+            """SELECT md_file_id FROM gpkg_metadata_reference WHERE table_name = :table_name;""",
+            {"table_name": table_name},
         )
-        ids = [row[0] for row in dbcur]
-        dbcur.execute(
-            """DELETE FROM gpkg_metadata_reference WHERE table_name = ?;""",
-            (table_name,),
+        ids = [row[0] for row in r]
+        db.execute(
+            """DELETE FROM gpkg_metadata_reference WHERE table_name = :table_name;""",
+            {"table_name": table_name},
         )
         if ids:
-            dbcur.execute(
-                f"""DELETE FROM gpkg_metadata WHERE id IN ({placeholders(ids)});""",
-                ids,
+            db.execute(
+                """DELETE FROM gpkg_metadata WHERE id = :id;""",
+                [{"id": i} for i in ids],
             )
 
-    def _create_spatial_index(self, dbcur, dataset):
+    def _create_spatial_index(self, db, dataset):
         L = logging.getLogger(f"{self.__class__.__qualname__}._create_spatial_index")
         geom_col = dataset.geom_column_name
 
@@ -457,8 +413,9 @@ class WorkingCopy_GPKG(WorkingCopy):
         t0 = time.monotonic()
         L.debug("Creating spatial index for %s.%s", dataset.table_name, geom_col)
 
-        dbcur.execute(
-            "SELECT gpkgAddSpatialIndex(?, ?);", (dataset.table_name, geom_col)
+        db.execute(
+            "SELECT gpkgAddSpatialIndex(:table, :geom);",
+            {"table": dataset.table_name, "geom": geom_col},
         )
 
         L.info("Created spatial index in %ss", time.monotonic() - t0)
@@ -474,8 +431,8 @@ class WorkingCopy_GPKG(WorkingCopy):
         rtree_table = f"rtree_{dataset.table_name}_{geom_col}"
         dbcur.execute(f"DROP TABLE {gpkg.ident(rtree_table)};")
         dbcur.execute(
-            f"DELETE FROM gpkg_extensions WHERE (table_name, column_name, extension_name) = (?, ?, ?)",
-            (dataset.table_name, geom_col, "gpkg_rtree_index"),
+            f"DELETE FROM gpkg_extensions WHERE (table_name, column_name, extension_name) = (:table_name, :column_name, 'gpkg_rtree_index')",
+            {"table_name": dataset.table_name, "column_name": geom_col},
         )
 
         L.info("Dropped spatial index in %ss", time.monotonic() - t0)
@@ -495,60 +452,53 @@ class WorkingCopy_GPKG(WorkingCopy):
             self._create_triggers(dbcur, dataset)
 
     def update_gpkg_contents(self, dataset, change_time):
-        table = dataset.table_name
+        table_name = dataset.table_name
 
         with self.session() as db:
-            dbcur = db.cursor()
-
             if dataset.has_geometry:
                 geom_col = dataset.geom_column_name
                 sql = f"""
                     UPDATE gpkg_contents
                     SET
-                        min_x=(SELECT ST_MinX(Extent({gpkg.ident(geom_col)})) FROM {gpkg.ident(table)}),
-                        min_y=(SELECT ST_MinY(Extent({gpkg.ident(geom_col)})) FROM {gpkg.ident(table)}),
-                        max_x=(SELECT ST_MaxX(Extent({gpkg.ident(geom_col)})) FROM {gpkg.ident(table)}),
-                        max_y=(SELECT ST_MaxY(Extent({gpkg.ident(geom_col)})) FROM {gpkg.ident(table)}),
-                        last_change=?
+                        min_x=(SELECT ST_MinX(Extent({gpkg.ident(geom_col)})) FROM {gpkg.ident(table_name)}),
+                        min_y=(SELECT ST_MinY(Extent({gpkg.ident(geom_col)})) FROM {gpkg.ident(table_name)}),
+                        max_x=(SELECT ST_MaxX(Extent({gpkg.ident(geom_col)})) FROM {gpkg.ident(table_name)}),
+                        max_y=(SELECT ST_MaxY(Extent({gpkg.ident(geom_col)})) FROM {gpkg.ident(table_name)}),
+                        last_change=:last_change
                     WHERE
-                        table_name=?;
+                        table_name=:table_name
                 """
             else:
                 sql = """
                     UPDATE gpkg_contents
-                    SET
-                        min_x=NULL,
-                        min_y=NULL,
-                        max_x=NULL,
-                        max_y=NULL,
-                        last_change=?
+                    SET min_x=NULL, min_y=NULL, max_x=NULL, max_y=NULL,
+                        last_change=:last_change
                     WHERE
-                        table_name=?;
+                        table_name=:table_name
                 """
 
-            dbcur.execute(
+            rc = db.execute(
                 sql,
-                (
-                    change_time.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),  # GPKG Spec Req.15
-                    table,
-                ),
-            )
-
-            rc = changes_rowcount(dbcur)
+                {
+                    "last_change": change_time.strftime(
+                        "%Y-%m-%dT%H:%M:%S.%fZ"
+                    ),  # GPKG Spec Req.15
+                    "table_name": table_name,
+                },
+            ).rowcount
             assert rc == 1, f"gpkg_contents update: expected 1Δ, got {rc}"
 
     def get_db_tree(self, table_name="*"):
         with self.session() as db:
-            dbcur = db.cursor()
-            dbcur.execute(
+            r = db.execute(
                 f"""
                     SELECT value
                     FROM {self.STATE_TABLE}
-                    WHERE table_name=? AND key=?;
+                    WHERE table_name=:table_name AND key='tree';
                 """,
-                (table_name, "tree"),
+                {"table_name": table_name},
             )
-            row = dbcur.fetchone()
+            row = r.fetchone()
             if not row:
                 # It's okay to not have anything in the tree table - it might just mean there are no commits yet.
                 # It might also mean that the working copy is not yet initialised - see WorkingCopy.get
@@ -557,13 +507,13 @@ class WorkingCopy_GPKG(WorkingCopy):
             wc_tree_id = row[0]
             return wc_tree_id
 
-    def _create_triggers(self, dbcur, dataset):
+    def _create_triggers(self, db, dataset):
         table = dataset.table_name
         pkf = gpkg.ident(dataset.primary_key)
         ts = gpkg.param_str(table)
 
         # sqlite doesn't let you do param substitutions in CREATE TRIGGER
-        dbcur.execute(
+        db.execute(
             f"""
             CREATE TRIGGER {self._sno_table(table, 'ins')}
                AFTER INSERT
@@ -575,7 +525,7 @@ class WorkingCopy_GPKG(WorkingCopy):
             END;
         """
         )
-        dbcur.execute(
+        db.execute(
             f"""
             CREATE TRIGGER {self._sno_table(table, 'upd')}
                AFTER UPDATE
@@ -589,7 +539,7 @@ class WorkingCopy_GPKG(WorkingCopy):
             END;
         """
         )
-        dbcur.execute(
+        db.execute(
             f"""
             CREATE TRIGGER {self._sno_table(table, 'del')}
                AFTER DELETE
@@ -632,10 +582,8 @@ class WorkingCopy_GPKG(WorkingCopy):
 
         L = logging.getLogger(f"{self.__class__.__qualname__}.write_full")
         with self.session(bulk=(0 if safe else 2)) as db:
-            dbcur = db.cursor()
-
             for dataset in datasets:
-                table = dataset.table_name
+                table_name = dataset.table_name
 
                 self.write_meta(dataset)
 
@@ -649,29 +597,25 @@ class WorkingCopy_GPKG(WorkingCopy):
                         + table_spec
                     )
 
-                dbcur.execute(f"""CREATE TABLE {gpkg.ident(table)} ({table_spec});""")
+                db.execute(f"""CREATE TABLE {gpkg.ident(table_name)} ({table_spec});""")
 
                 if dataset.has_geometry:
-                    self._create_spatial_index(dbcur, dataset)
+                    self._create_spatial_index(db, dataset)
 
                 L.info("Creating features...")
-                sql_insert_features = f"""
-                    INSERT INTO {gpkg.ident(table)}
-                        ({','.join([gpkg.ident(col.name) for col in dataset.schema])})
-                    VALUES
-                        ({placeholders(dataset.schema.columns)});
-                """
+
+                sql = insert_command(dataset.table_name, dataset.schema.column_names)
                 feat_progress = 0
                 t0 = time.monotonic()
                 t0p = t0
 
                 CHUNK_SIZE = 10000
                 total_features = dataset.feature_count
+
                 for row_dicts in self._chunk(
                     dataset.features_with_crs_ids(), CHUNK_SIZE
                 ):
-                    row_tuples = (row_dict.values() for row_dict in row_dicts)
-                    dbcur.executemany(sql_insert_features, row_tuples)
+                    db.execute(sql, row_dicts)
                     feat_progress += len(row_dicts)
 
                     t0a = time.monotonic()
@@ -693,64 +637,68 @@ class WorkingCopy_GPKG(WorkingCopy):
                 )
 
                 self.update_gpkg_contents(dataset, change_time)
-                self._create_triggers(dbcur, dataset)
+                self._create_triggers(db, dataset)
 
-            dbcur.execute(
-                f"INSERT OR REPLACE INTO {self.STATE_TABLE} (table_name, key, value) VALUES (?, ?, ?);",
-                ("*", "tree", target_tree_or_commit.peel(pygit2.Tree).hex),
-            )
+            row = {
+                "table_name": "*",
+                "key": "tree",
+                "value": target_tree_or_commit.peel(pygit2.Tree).hex,
+            }
+            db.execute(insert_or_replace_command(self.STATE_TABLE, row.keys()), row)
 
-    def write_features(self, dbcur, dataset, pk_iter, *, ignore_missing=False):
-        sql_write_feature = f"""
-            INSERT OR REPLACE INTO {gpkg.ident(dataset.table_name)}
-                ({','.join([gpkg.ident(col.name) for col in dataset.schema])})
-            VALUES
-                ({placeholders(dataset.schema.columns)});
-        """
-
+    def write_features(self, db, dataset, pk_list, *, ignore_missing=False):
+        sql = insert_or_replace_command(dataset.table_name, dataset.schema.column_names)
         feat_count = 0
         CHUNK_SIZE = 10000
         for row_dicts in self._chunk(
-            dataset.get_features_with_crs_ids(pk_iter, ignore_missing=ignore_missing),
+            dataset.get_features_with_crs_ids(pk_list, ignore_missing=ignore_missing),
             CHUNK_SIZE,
         ):
-            row_tuples = (row_dict.values() for row_dict in row_dicts)
-            dbcur.executemany(sql_write_feature, row_tuples)
-            feat_count += changes_rowcount(dbcur)
+            r = db.execute(sql, row_dicts)
+            feat_count += r.rowcount
 
         return feat_count
 
-    def delete_features(self, dbcur, dataset, pk_iter):
-        sql_del_feature = f"""
-            DELETE FROM {gpkg.ident(dataset.table_name)}
-            WHERE {gpkg.ident(dataset.primary_key)}=?;
-        """
+    def delete_features(self, db, dataset, pk_list):
+        if not pk_list:
+            return 0
 
-        feat_count = 0
         CHUNK_SIZE = 10000
-        for rows in self._chunk(zip(pk_iter), CHUNK_SIZE):
-            dbcur.executemany(sql_del_feature, rows)
-            feat_count += changes_rowcount(dbcur)
+        for pks in self._chunk(pk_list, CHUNK_SIZE):
+            r = db.execute(
+                f"""
+                    DELETE FROM {gpkg.ident(dataset.table_name)}
+                    WHERE {gpkg.ident(dataset.primary_key)}=:pk;
+                """,
+                [{"pk": pk} for pk in pks],
+            )
 
-        return feat_count
+        return r.rowcount
 
     def drop_table(self, target_tree_or_commit, *datasets):
         with self.session() as db:
-            dbcur = db.cursor()
             for dataset in datasets:
-                table = dataset.table_name
+                table_name = dataset.table_name
                 if dataset.has_geometry:
-                    self._drop_spatial_index(dbcur, dataset)
+                    self._drop_spatial_index(db, dataset)
 
-                dbcur.execute(f"""DROP TABLE IF EXISTS {gpkg.ident(table)};""")
+                db.execute(f"""DROP TABLE IF EXISTS {gpkg.ident(table_name)};""")
                 self.delete_meta(dataset)
 
-                dbcur.execute(
-                    f"""DELETE FROM {self.TRACKING_TABLE} WHERE table_name=?;""",
-                    (table,),
+                db.execute(
+                    f"""DELETE FROM {self.TRACKING_TABLE} WHERE table_name = :table_name;""",
+                    {"table_name": table_name},
                 )
 
-    def _execute_diff_query(self, dbcur, dataset, feature_filter=None, meta_diff=None):
+    def _execute_dirty_pks_query(self, db, dataset):
+        return db.execute(
+            f"""SELECT pk FROM {self.TRACKING_TABLE} WHERE table_name = :table_name;""",
+            {"table_name": dataset.table_name},
+        )
+
+    def _execute_dirty_rows_query(
+        self, db, dataset, feature_filter=None, meta_diff=None
+    ):
         feature_filter = feature_filter or UNFILTERED
         table = dataset.table_name
         if (
@@ -771,26 +719,21 @@ class WorkingCopy_GPKG(WorkingCopy):
                 {col_names}
             FROM {self.TRACKING_TABLE} TRA LEFT OUTER JOIN {gpkg.ident(table)} TAB
             ON (TRA.pk = TAB.{gpkg.ident(pk_field)})
-            WHERE (TRA.table_name = ?)
+            WHERE (TRA.table_name = :table_name)
         """
-        params = [table]
+        params = {"table_name": table}
 
         if feature_filter is not UNFILTERED:
-            diff_sql += f"\nAND TRA.pk IN ({placeholders(feature_filter)})"
-            params += [str(pk) for pk in feature_filter]
-        dbcur.execute(diff_sql, params)
-
-    def _execute_dirty_rows_query(self, dbcur, dataset):
-        sql_changed = f"SELECT pk FROM {self.TRACKING_TABLE} " "WHERE table_name=?;"
-        dbcur.execute(sql_changed, (dataset.table_name,))
+            diff_sql += " AND TRA.pk = :pk"
+            params = [{"table_name": table, "pk": str(pk)} for pk in feature_filter]
+        return db.execute(diff_sql, params)
 
     def reset_tracking_table(self, reset_filter=UNFILTERED):
         reset_filter = reset_filter or UNFILTERED
 
         with self.session() as db:
-            dbcur = db.cursor()
             if reset_filter == UNFILTERED:
-                dbcur.execute(f"DELETE FROM {self.TRACKING_TABLE};")
+                db.execute(f"DELETE FROM {self.TRACKING_TABLE};")
                 return
 
             for dataset_path, dataset_filter in reset_filter.items():
@@ -799,33 +742,31 @@ class WorkingCopy_GPKG(WorkingCopy):
                     dataset_filter == UNFILTERED
                     or dataset_filter.get("feature") == UNFILTERED
                 ):
-                    dbcur.execute(
-                        f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=?;",
-                        (table,),
+                    db.execute(
+                        f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=:table_name;",
+                        {"table_name": table},
                     )
                     continue
 
-                CHUNK_SIZE = 100
                 pks = dataset_filter.get("feature", ())
-                for pk_chunk in self._chunk(pks, CHUNK_SIZE):
-                    dbcur.execute(
-                        f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=? AND pk IN ({placeholders(pk_chunk)});",
-                        (table, *pk_chunk),
-                    )
+                db.execute(
+                    f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=:table_name AND pk=:pk;",
+                    [{"table_name": table, "pk": str(pk)} for pk in pks],
+                )
 
-    def _reset_tracking_table_for_dataset(self, dbcur, dataset):
-        dbcur.execute(
-            f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=?;",
-            (dataset.table_name,),
+    def _reset_tracking_table_for_dataset(self, db, dataset):
+        r = db.execute(
+            f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=:table_name;",
+            {"table_name": dataset.table_name},
         )
-        return changes_rowcount(dbcur)
+        return r.rowcount
 
-    def _update_state_table_tree_impl(self, dbcur, tree_id):
-        dbcur.execute(
-            f"UPDATE {self.STATE_TABLE} SET value=? WHERE table_name='*' AND key='tree';",
-            (tree_id,),
+    def _update_state_table_tree_impl(self, db, tree_id):
+        r = db.execute(
+            f"UPDATE {self.STATE_TABLE} SET value=:value WHERE table_name='*' AND key='tree';",
+            {"value": tree_id},
         )
-        return changes_rowcount(dbcur)
+        return r.rowcount
 
     def _is_meta_update_supported(self, dataset_version, meta_diff):
         """
@@ -856,22 +797,22 @@ class WorkingCopy_GPKG(WorkingCopy):
         dt.pop("name_updates")
         return sum(dt.values()) == 0
 
-    def _apply_meta_title(self, dataset, src_value, dest_value, dbcur):
+    def _apply_meta_title(self, dataset, src_value, dest_value, db):
         # TODO - find a better way to roundtrip titles while keeping them unique
-        table = dataset.table_name
-        identifier = f"{table}: {dest_value}"
-        dbcur.execute(
-            """UPDATE gpkg_contents SET identifier = ? WHERE table_name = ?""",
-            (identifier, table),
+        table_name = dataset.table_name
+        identifier = f"{table_name}: {dest_value}"
+        db.execute(
+            """UPDATE gpkg_contents SET identifier = :identifier WHERE table_name = :table_name""",
+            {"identifier": identifier, "table_name": table_name},
         )
 
-    def _apply_meta_description(self, dataset, src_value, dest_value, dbcur):
-        dbcur.execute(
-            """UPDATE gpkg_contents SET description = ? WHERE table_name = ?""",
-            (dest_value, dataset.table_name),
+    def _apply_meta_description(self, dataset, src_value, dest_value, db):
+        db.execute(
+            """UPDATE gpkg_contents SET description = :description WHERE table_name = :table_name""",
+            {"description": dest_value, "table_name": dataset.table_name},
         )
 
-    def _apply_meta_schema_json(self, dataset, src_value, dest_value, dbcur):
+    def _apply_meta_schema_json(self, dataset, src_value, dest_value, db):
         src_schema = Schema.from_column_dicts(src_value)
         dest_schema = Schema.from_column_dicts(dest_value)
 
@@ -885,32 +826,30 @@ class WorkingCopy_GPKG(WorkingCopy):
         for col_id in name_updates:
             src_name = src_schema[col_id].name
             dest_name = dest_schema[col_id].name
-            dbcur.execute(
+            db.execute(
                 f"""
                     ALTER TABLE {gpkg.ident(dataset.table_name)}
                     RENAME COLUMN {gpkg.ident(src_name)} TO {gpkg.ident(dest_name)}
                 """
             )
 
-    def _apply_meta_metadata_dataset_json(self, dataset, src_value, dest_value, dbcur):
+    def _apply_meta_metadata_dataset_json(self, dataset, src_value, dest_value, db):
         table = dataset.table_name
-        self._delete_meta_metadata(table, dbcur)
+        self._delete_meta_metadata(table, db)
         if dest_value:
             gpkg_metadata = gpkg_adapter.json_to_gpkg_metadata(dest_value, table)
             gpkg_metadata_reference = gpkg_adapter.json_to_gpkg_metadata(
                 dest_value, table, reference=True
             )
-            self._write_meta_metadata(
-                table, gpkg_metadata, gpkg_metadata_reference, dbcur
-            )
+            self._write_meta_metadata(table, gpkg_metadata, gpkg_metadata_reference, db)
 
     def _update_table(
-        self, base_ds, target_ds, dbcur, commit=None, track_changes_as_dirty=False
+        self, base_ds, target_ds, db, commit=None, track_changes_as_dirty=False
     ):
-        super()._update_table(base_ds, target_ds, dbcur, commit, track_changes_as_dirty)
-        self._update_gpkg_contents(target_ds, dbcur, commit)
+        super()._update_table(base_ds, target_ds, db, commit, track_changes_as_dirty)
+        self._update_gpkg_contents(target_ds, db, commit)
 
-    def _update_gpkg_contents(self, dataset, dbcur, commit=None):
+    def _update_gpkg_contents(self, dataset, db, commit=None):
         """
         Update the metadata for the given table in gpkg_contents to have the new bounding-box / last-updated timestamp.
         """
@@ -925,36 +864,31 @@ class WorkingCopy_GPKG(WorkingCopy):
         geom_col = dataset.geom_column_name
         if geom_col is not None:
             # FIXME: Why doesn't Extent(geom) work here as an aggregate?
-            dbcur.execute(
+            r = db.execute(
                 f"""
-                WITH _BBOX AS (
-                    SELECT
-                        Min(MbrMinX({gpkg.ident(geom_col)})) AS min_x,
-                        Min(MbrMinY({gpkg.ident(geom_col)})) AS min_y,
-                        Max(MbrMaxX({gpkg.ident(geom_col)})) AS max_x,
-                        Max(MbrMaxY({gpkg.ident(geom_col)})) AS max_y
-                    FROM {gpkg.ident(table)}
-                )
-                UPDATE gpkg_contents
-                SET
-                    last_change=?,
-                    min_x=(SELECT min_x FROM _BBOX),
-                    min_y=(SELECT min_y FROM _BBOX),
-                    max_x=(SELECT max_x FROM _BBOX),
-                    max_y=(SELECT max_y FROM _BBOX)
-                WHERE
-                    table_name=?;
+                WITH _E AS (SELECT extent({gpkg.ident(geom_col)}) AS extent FROM {gpkg.ident(table)})
+                SELECT ST_MinX(extent), ST_MinY(extent), ST_MaxX(extent), ST_MaxY(extent) FROM _E
+                """
+            )
+            min_x, min_y, max_x, max_y = r.fetchone()
+            rc = db.execute(
+                """
+                    UPDATE gpkg_contents
+                    SET (last_change, min_x, min_y, max_x, max_y) = (:last_change, :min_x, :min_y, :max_x, :max_y)
+                    WHERE table_name=:table_name;
                 """,
-                (
-                    gpkg_change_time,
-                    table,
-                ),
-            )
+                {
+                    "last_change": gpkg_change_time,
+                    "min_x": min_x,
+                    "min_y": min_y,
+                    "max_x": max_x,
+                    "max_y": max_y,
+                    "table_name": table,
+                },
+            ).rowcount
         else:
-            dbcur.execute(
-                """UPDATE gpkg_contents SET last_change=? WHERE table_name=?;""",
-                (gpkg_change_time, table),
-            )
-
-        rc = changes_rowcount(dbcur)
+            rc = db.execute(
+                """UPDATE gpkg_contents SET last_change=:last_change WHERE table_name=:table_name;""",
+                {"last_change": gpkg_change_time, "table_name": table},
+            ).rowcount
         assert rc == 1, f"gpkg_contents update: expected 1Δ, got {rc}"

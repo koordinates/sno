@@ -1,6 +1,7 @@
 import json
 import pytest
 
+from sno.sqlalchemy import gpkg_engine
 from sno.exceptions import SUCCESS, INVALID_OPERATION, NO_CONFLICT
 from sno.merge_util import (
     MergeIndex,
@@ -30,9 +31,7 @@ H = pytest.helpers.helpers()
         pytest.param(H.TABLE, id="table"),
     ],
 )
-def test_merge_fastforward(
-    data, data_working_copy, geopackage, cli_runner, insert, request
-):
+def test_merge_fastforward(data, data_working_copy, cli_runner, insert, request):
     with data_working_copy(data.ARCHIVE) as (repo_path, wc):
         repo = SnoRepo(repo_path)
         # new branch
@@ -43,10 +42,10 @@ def test_merge_fastforward(
         h = repo.head.target.hex
 
         # make some changes
-        db = geopackage(wc)
-        insert(db)
-        insert(db)
-        commit_id = insert(db)
+        with gpkg_engine(wc).connect() as db:
+            insert(db)
+            insert(db)
+            commit_id = insert(db)
 
         H.git_graph(request, "pre-merge")
         assert repo.head.target.hex == commit_id
@@ -84,7 +83,6 @@ def test_merge_fastforward(
 def test_merge_fastforward_noff(
     data,
     data_working_copy,
-    geopackage,
     cli_runner,
     insert,
     request,
@@ -100,10 +98,10 @@ def test_merge_fastforward_noff(
         h = repo.head.target.hex
 
         # make some changes
-        db = geopackage(wc)
-        insert(db)
-        insert(db)
-        commit_id = insert(db)
+        with gpkg_engine(wc).connect() as db:
+            insert(db)
+            insert(db)
+            commit_id = insert(db)
 
         H.git_graph(request, "pre-merge")
         assert repo.head.target.hex == commit_id
@@ -146,14 +144,14 @@ def test_merge_fastforward_noff(
 def test_merge_true(
     data,
     data_working_copy,
-    geopackage,
     cli_runner,
     insert,
     request,
     disable_editor,
 ):
-    with data_working_copy(data.ARCHIVE) as (repo_path, wc):
+    with data_working_copy(data.ARCHIVE) as (repo_path, wc_path):
         repo = SnoRepo(repo_path)
+        wc = repo.working_copy
         # new branch
         r = cli_runner.invoke(["checkout", "-b", "changes"])
         assert r.exit_code == 0, r
@@ -162,17 +160,18 @@ def test_merge_true(
         h = repo.head.target.hex
 
         # make some changes
-        db = geopackage(wc)
-        dbcur = db.cursor()
-        insert(db)
-        insert(db)
-        b_commit_id = insert(db)
-        assert repo.head.target.hex == b_commit_id
+        with wc.session() as db:
+            insert(db)
+            insert(db)
+            b_commit_id = insert(db)
+            assert repo.head.target.hex == b_commit_id
 
         r = cli_runner.invoke(["checkout", "master"])
         assert r.exit_code == 0, r
         assert repo.head.target.hex != b_commit_id
-        m_commit_id = insert(db)
+
+        with wc.session() as db:
+            m_commit_id = insert(db)
         H.git_graph(request, "pre-merge-master")
 
         # fastforward merge should fail
@@ -199,11 +198,15 @@ def test_merge_true(
 
         # check the database state
         num_inserts = len(insert.inserted_fids)
-        dbcur.execute(
-            f"SELECT COUNT(*) FROM {data.LAYER} WHERE {data.LAYER_PK} IN ({','.join(['?']*num_inserts)});",
-            insert.inserted_fids,
-        )
-        assert dbcur.fetchone()[0] == num_inserts
+
+        with wc.session() as db:
+            rowcount = 0
+            for pk in insert.inserted_fids:
+                rowcount += db.execute(
+                    f"SELECT COUNT(*) FROM {data.LAYER} WHERE {data.LAYER_PK} = :pk",
+                    {"pk": pk},
+                ).fetchone()[0]
+            assert rowcount == num_inserts
 
 
 @pytest.mark.parametrize(

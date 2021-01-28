@@ -1,8 +1,6 @@
 import collections
 
-import apsw
-
-from sno import gpkg_adapter, spatialite_path
+from sno import gpkg_adapter
 
 
 def ident(identifier):
@@ -21,49 +19,6 @@ def param_str(value):
         return "NULL"
     escaped = value.replace("'", "''")
     return f"'{escaped}'"
-
-
-class Row(tuple):
-    def __new__(cls, cursor, row):
-        return super(Row, cls).__new__(cls, row)
-
-    def __init__(self, cursor, row):
-        self._desc = tuple(d for d, _ in cursor.getdescription())
-
-    def keys(self):
-        return tuple(self._desc)
-
-    def items(self):
-        return ((k, self.__getitem__(i)) for i, k in enumerate(self._desc))
-
-    def values(self):
-        return self
-
-    def __getitem__(self, key):
-        if isinstance(key, str):
-            try:
-                i = self._desc.index(key)
-                return super().__getitem__(i)
-            except ValueError:
-                raise KeyError(key)
-        else:
-            return super().__getitem__(key)
-
-
-def db(path, **kwargs):
-    db = apsw.Connection(str(path), **kwargs)
-    db.setrowtrace(Row)
-    dbcur = db.cursor()
-    dbcur.execute("PRAGMA foreign_keys = ON;")
-
-    current_journal = dbcur.execute("PRAGMA journal_mode").fetchone()[0]
-    if current_journal.lower() == "delete":
-        dbcur.execute("PRAGMA journal_mode = TRUNCATE;")  # faster
-
-    db.config(apsw.SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 1)
-    db.loadextension(spatialite_path)
-    dbcur.execute("SELECT EnableGpkgMode();")
-    return db
 
 
 def get_gpkg_meta_items_obj(db, layer):
@@ -99,38 +54,39 @@ def get_gpkg_meta_items_obj(db, layer):
     return GpkgTableMetaItems(db, layer)
 
 
-def get_gpkg_meta_items(db, layer, keys=None):
+def get_gpkg_meta_items(db, table_name, keys=None):
     """
     Returns metadata from the gpkg_* tables about this GPKG.
     Keep this in sync with OgrImportSource.gpkg_meta_items for other datasource types.
     """
-    dbcur = db.cursor()
-    table = layer
 
     QUERIES = {
         "gpkg_contents": (
             # we ignore dynamic fields (last-change, min_x, min_y, max_x, max_y)
-            f"SELECT table_name, data_type, identifier, description, srs_id FROM gpkg_contents WHERE table_name=?;",
-            (table,),
+            """
+            SELECT table_name, data_type, identifier, description, srs_id
+            FROM gpkg_contents WHERE table_name=:table_name;
+            """,
             dict,
         ),
         "gpkg_geometry_columns": (
-            f"SELECT table_name, column_name, geometry_type_name, srs_id, z, m FROM gpkg_geometry_columns WHERE table_name=?;",
-            (table,),
+            """
+            SELECT table_name, column_name, geometry_type_name, srs_id, z, m
+            FROM gpkg_geometry_columns WHERE table_name=:table_name;
+            """,
             dict,
         ),
-        "sqlite_table_info": (f"PRAGMA table_info({ident(table)});", (), list),
+        "sqlite_table_info": (f"PRAGMA table_info({ident(table_name)});", list),
         "gpkg_metadata_reference": (
             """
             SELECT MR.*
             FROM gpkg_metadata_reference MR
                 INNER JOIN gpkg_metadata M ON (MR.md_file_id = M.id)
             WHERE
-                MR.table_name=?
+                MR.table_name=:table_name
                 AND MR.column_name IS NULL
                 AND MR.row_id_value IS NULL;
             """,
-            (table,),
             list,
         ),
         "gpkg_metadata": (
@@ -139,11 +95,10 @@ def get_gpkg_meta_items(db, layer, keys=None):
             FROM gpkg_metadata_reference MR
                 INNER JOIN gpkg_metadata M ON (MR.md_file_id = M.id)
             WHERE
-                MR.table_name=?
+                MR.table_name=:table_name
                 AND MR.column_name IS NULL
                 AND MR.row_id_value IS NULL;
             """,
-            (table,),
             list,
         ),
         "gpkg_spatial_ref_sys": (
@@ -153,29 +108,26 @@ def get_gpkg_meta_items(db, layer, keys=None):
                 LEFT OUTER JOIN gpkg_contents C ON (C.srs_id = SRS.srs_id)
                 LEFT OUTER JOIN gpkg_geometry_columns G ON (G.srs_id = SRS.srs_id)
             WHERE
-                (C.table_name=? OR G.table_name=?)
+                (C.table_name=:table_name OR G.table_name=:table_name)
             """,
-            (table, table),
             list,
         ),
     }
     try:
-        for key, (sql, params, rtype) in QUERIES.items():
+        for key, (sql, rtype) in QUERIES.items():
             if keys is not None and key not in keys:
                 continue
             # check table exists, the metadata ones may not
             if not key.startswith("sqlite_"):
-                dbcur.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name=?;",
-                    (key,),
+                r = db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name=:name;",
+                    {"name": key},
                 )
-                if not dbcur.fetchone():
+                if not r.fetchone():
                     continue
 
-            dbcur.execute(sql, params)
-            value = [
-                collections.OrderedDict(sorted(zip(row.keys(), row))) for row in dbcur
-            ]
+            r = db.execute(sql, {"table_name": table_name})
+            value = [collections.OrderedDict(sorted(zip(row.keys(), row))) for row in r]
             if rtype is dict:
                 value = value[0] if len(value) else None
             yield (key, value)
@@ -193,7 +145,7 @@ def pk(db, table):
     # is no primary key column, the first column SHALL be of type INTEGER and
     # SHALL contain unique values for each row.
 
-    q = db.cursor().execute(f"PRAGMA table_info({ident(table)});")
+    q = db.execute(f"PRAGMA table_info({ident(table)});")
     fields = []
     for field in q:
         if field["pk"]:
@@ -207,13 +159,13 @@ def pk(db, table):
 
 
 def geom_cols(db, table):
-    q = db.cursor().execute(
+    q = db.execute(
         """
             SELECT column_name
             FROM gpkg_geometry_columns
-            WHERE table_name=?
+            WHERE table_name=:table_name
             ORDER BY column_name;
         """,
-        (table,),
+        {"table_name": table},
     )
     return tuple(r[0] for r in q)

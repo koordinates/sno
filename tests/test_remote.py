@@ -2,9 +2,9 @@ import subprocess
 from pathlib import PureWindowsPath
 
 import pytest
-import pygit2
 
 from sno.clone import get_directory_from_url
+from sno.sqlalchemy import gpkg_engine
 from sno.repo import SnoRepo
 
 
@@ -55,7 +55,6 @@ def test_clone(
     tmp_path,
     cli_runner,
     chdir,
-    geopackage,
     branch_name,
     branch_ref,
 ):
@@ -108,15 +107,14 @@ def test_clone(
             assert repo.config["sno.repository.version"] == "2"
             assert repo.config["sno.workingcopy.path"] == wc.name
 
-            db = geopackage(wc)
-            dbcur = db.cursor()
-            nrows = dbcur.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
-            assert nrows > 0
+            with gpkg_engine(wc).connect() as db:
+                nrows = db.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
+                assert nrows > 0
 
-            wc_tree_id = dbcur.execute(
-                """SELECT value FROM "gpkg_sno_state" WHERE table_name='*' AND key='tree';""",
-            ).fetchone()[0]
-            assert wc_tree_id == repo.head_tree.hex
+                wc_tree_id = db.execute(
+                    """SELECT value FROM "gpkg_sno_state" WHERE table_name='*' AND key='tree';""",
+                ).fetchone()[0]
+                assert wc_tree_id == repo.head_tree.hex
         else:
             assert not wc.exists()
 
@@ -124,7 +122,6 @@ def test_clone(
 def test_fetch(
     data_archive_readonly,
     data_working_copy,
-    geopackage,
     cli_runner,
     insert,
     tmp_path,
@@ -136,8 +133,8 @@ def test_fetch(
         r = cli_runner.invoke(["remote", "add", "myremote", tmp_path])
         assert r.exit_code == 0, r
 
-        db = geopackage(wc)
-        commit_id = insert(db)
+        with gpkg_engine(wc).connect() as db:
+            commit_id = insert(db)
 
         r = cli_runner.invoke(["push", "--set-upstream", "myremote", "master"])
         assert r.exit_code == 0, r
@@ -177,7 +174,6 @@ def test_fetch(
 def test_pull(
     data_archive_readonly,
     data_working_copy,
-    geopackage,
     cli_runner,
     insert,
     tmp_path,
@@ -207,8 +203,8 @@ def test_pull(
             assert r.exit_code == 0, r
 
         with chdir(path1):
-            db = geopackage(wc1)
-            commit_id = insert(db)
+            with gpkg_engine(wc1).connect() as db:
+                commit_id = insert(db)
 
             r = cli_runner.invoke(["push"])
             assert r.exit_code == 0, r

@@ -57,7 +57,6 @@ def fsck(ctx, reset_datasets, fsck_args):
         return _fsck_reset(repo, working_copy, reset_datasets)
 
     with working_copy.session() as db:
-        dbcur = db.cursor()
         tree = repo.head_tree
 
         # compare repo tree id to what's in the DB
@@ -90,8 +89,8 @@ def fsck(ctx, reset_datasets, fsck_args):
                     fg="red",
                 )
 
-            dbcur.execute(f"SELECT COUNT(*) FROM {gpkg.ident(table)};")
-            wc_count = dbcur.fetchall()[0][0]
+            r = db.execute(f"SELECT COUNT(*) FROM {gpkg.ident(table)};")
+            wc_count = r.scalar()
             click.echo(f"{wc_count} features in {table}")
             ds_count = dataset.feature_count
             if wc_count != ds_count:
@@ -101,11 +100,11 @@ def fsck(ctx, reset_datasets, fsck_args):
                     fg="red",
                 )
 
-            dbcur.execute(
-                f"SELECT COUNT(*) FROM {working_copy.TRACKING_TABLE} WHERE table_name=?;",
-                [table],
+            r = db.execute(
+                f"SELECT COUNT(*) FROM {working_copy.TRACKING_TABLE} WHERE table_name=:table_name;",
+                {"table_name": table},
             )
-            track_count = dbcur.fetchall()[0][0]
+            track_count = r.scalar()
             click.echo(f"{track_count} rows marked as changed in working-copy")
 
             wc_diff = working_copy.diff_db_to_tree(dataset)
@@ -168,11 +167,11 @@ def fsck(ctx, reset_datasets, fsck_args):
                             fg="red",
                         )
 
-                    dbcur.execute(
-                        f"SELECT * FROM {gpkg.ident(table)} WHERE {gpkg.ident(pk)}=?;",
-                        [feature[pk]],
+                    f = db.execute(
+                        f"SELECT * FROM {gpkg.ident(table)} WHERE {gpkg.ident(pk)}=:pk;",
+                        {"pk": feature[pk]},
                     )
-                    db_obj = dict(dbcur.fetchone())
+                    db_obj = dict(f.fetchone())
                     if db_obj is not None and geom_col is not None:
                         db_obj[geom_col] = normalise_gpkg_geom(db_obj[geom_col])
                     if db_obj != feature:

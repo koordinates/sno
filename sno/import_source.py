@@ -108,11 +108,9 @@ class ImportSource:
         from the import-source that it represents (in _init_schema), the importer has the option to modify it.
         This is commonly done to replace the schema with one that is aligned with pre-existing data, if present.
         """
-        try:
-            return self._schema
-        except AttributeError:
+        if not hasattr(self, "_schema"):
             self._schema = self._init_schema()
-            return self._schema
+        return self._schema
 
     @schema.setter
     def schema(self, value):

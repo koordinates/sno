@@ -10,10 +10,11 @@ import pygit2
 import pytest
 
 from sno import fast_import, gpkg
-from sno.ogr_import_source import OgrImportSource, PostgreSQLImportSource
 from sno.dataset2 import Dataset2
 from sno.exceptions import INVALID_OPERATION
+from sno.sqlalchemy import gpkg_engine
 from sno.geometry import ogr_to_gpkg_geom, gpkg_geom_to_ogr
+from sno.ogr_import_source import OgrImportSource, PostgreSQLImportSource
 from sno.repo import SnoRepo
 
 
@@ -46,31 +47,25 @@ GPKG_IMPORTS = (
 )
 
 
-def _import_check(repo_path, table, source_gpkg, geopackage):
+def _import_check(repo_path, table, source_gpkg):
     repo = SnoRepo(repo_path)
     dataset = repo.datasets()[table]
     assert dataset.VERSION == 2
 
-    db = geopackage(source_gpkg)
-    num_rows = db.cursor().execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
+    with gpkg_engine(source_gpkg).connect() as db:
+        num_rows = db.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
 
     o = subprocess.check_output(["git", "ls-tree", "-r", "-t", "HEAD", table])
     print("\n".join(l.decode("utf8") for l in o.splitlines()[:20]))
 
-    if dataset.VERSION == 1:
-        re_paths = (
-            r"^\d{6} blob [0-9a-f]{40}\t%s/.sno-table/[0-9a-f]{2}/[0-9a-f]{2}/([^/]+)$"
-            % table
-        )
-    elif dataset.VERSION == 2:
-        re_paths = r"^\d{6} blob [0-9a-f]{40}\t%s/.sno-dataset/feature/.*$" % table
-    else:
+    if dataset.VERSION != 2:
         raise NotImplementedError(dataset.VERSION)
 
+    re_paths = r"^\d{6} blob [0-9a-f]{40}\t%s/.sno-dataset/feature/.*$" % table
     git_paths = [m for m in re.findall(re_paths, o.decode("utf-8"), re.MULTILINE)]
     assert len(git_paths) == num_rows
 
-    num_features = sum(1 for _ in dataset.features())
+    num_features = dataset.feature_count
     assert num_features == num_rows
 
     return dataset
@@ -115,7 +110,6 @@ def test_import(
     tmp_path,
     cli_runner,
     chdir,
-    geopackage,
     benchmark,
     request,
     monkeypatch,
@@ -139,14 +133,12 @@ def test_import(
         repo_path = tmp_path / "data.sno"
         repo_path.mkdir()
 
-        db = geopackage(f"{data / source_gpkg}")
-        dbcur = db.cursor()
-        if param_ids[-1] == "empty":
-            with db:
+        with gpkg_engine(data / source_gpkg).connect() as db:
+            if param_ids[-1] == "empty":
                 print(f"emptying table {table}...")
-                dbcur.execute(f"DELETE FROM {table};")
+                db.execute(f"DELETE FROM {table};")
 
-        num_rows = dbcur.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
+            num_rows = db.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
         benchmark.group = f"test_import - {param_ids[-1]} (N={num_rows})"
 
         if param_ids[-1] == "empty":
@@ -169,46 +161,41 @@ def test_import(
             # has a single commit
             assert len(list(repo.walk(repo.head.target))) == 1
 
-            dataset = _import_check(
-                repo_path, table, f"{data / source_gpkg}", geopackage
-            )
+            dataset = _import_check(repo_path, table, f"{data / source_gpkg}")
 
-            pk_field = gpkg.pk(db, table)
+            with gpkg_engine(data / source_gpkg).connect() as db:
+                pk_field = gpkg.pk(db, table)
 
-            # pk_list = sorted([v[pk_field] for k, v in dataset.features()])
-            # pk_gaps = sorted(set(range(pk_list[0], pk_list[-1] + 1)).difference(pk_list))
-            # print("pk_gaps:", pk_gaps)
+                if num_rows > 0:
+                    # compare the first feature in the repo against the source DB
+                    feature = next(dataset.features())
 
-            if num_rows > 0:
-                # compare the first feature in the repo against the source DB
-                feature = next(dataset.features())
-
-                row = normalise_feature(
-                    dbcur.execute(
-                        f"SELECT * FROM {table} WHERE {pk_field}=?;",
-                        [feature[pk_field]],
-                    ).fetchone()
-                )
-                feature = normalise_feature(feature)
-                print("First Feature:", feature, row)
-                assert feature == row
-
-                # compare a source DB feature against the repo feature
-                row = normalise_feature(
-                    dbcur.execute(
-                        f"SELECT * FROM {table} ORDER BY {pk_field} LIMIT 1 OFFSET {min(97,num_rows-1)};"
-                    ).fetchone()
-                )
-
-                for feature in dataset.features():
-                    if feature[pk_field] == row[pk_field]:
-                        feature = normalise_feature(feature)
-                        assert feature == row
-                        break
-                else:
-                    pytest.fail(
-                        f"Couldn't find repo feature {pk_field}={row[pk_field]}"
+                    row = normalise_feature(
+                        db.execute(
+                            f"SELECT * FROM {table} WHERE {pk_field}=?;",
+                            [feature[pk_field]],
+                        ).fetchone()
                     )
+                    feature = normalise_feature(feature)
+                    print("First Feature:", feature, row)
+                    assert feature == row
+
+                    # compare a source DB feature against the repo feature
+                    row = normalise_feature(
+                        db.execute(
+                            f"SELECT * FROM {table} ORDER BY {pk_field} LIMIT 1 OFFSET {min(97,num_rows-1)};"
+                        ).fetchone()
+                    )
+
+                    for feature in dataset.features():
+                        if feature[pk_field] == row[pk_field]:
+                            feature = normalise_feature(feature)
+                            assert feature == row
+                            break
+                    else:
+                        pytest.fail(
+                            f"Couldn't find repo feature {pk_field}={row[pk_field]}"
+                        )
 
 
 def _compare_ogr_and_gpkg_meta_items(dataset, gpkg_dataset):
@@ -294,7 +281,6 @@ def test_import_from_non_gpkg(
     tmp_path,
     cli_runner,
     chdir,
-    geopackage,
     request,
     source_format,
     source_ogr_driver,
@@ -305,14 +291,12 @@ def test_import_from_non_gpkg(
     param_ids = H.parameter_ids(request)
 
     with data_archive(archive) as data:
-        db = geopackage(f"{data / source_gpkg}")
-        dbcur = db.cursor()
-        if param_ids[-1] == "empty":
-            with db:
+        with gpkg_engine(data / source_gpkg).connect() as db:
+            if param_ids[-1] == "empty":
                 print(f"emptying table {table}...")
-                dbcur.execute(f"DELETE FROM {table};")
+                db.execute(f"DELETE FROM {table};")
 
-        num_rows = dbcur.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
+            num_rows = db.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
 
         if param_ids[-1] == "empty":
             assert num_rows == 0
@@ -363,9 +347,7 @@ def test_import_from_non_gpkg(
             # has a single commit
             assert len([c for c in repo.walk(repo.head.target)]) == 1
 
-            dataset = _import_check(
-                repo_path, table, f"{data / source_gpkg}", geopackage
-            )
+            dataset = _import_check(repo_path, table, f"{data / source_gpkg}")
 
             # Compare the meta items to the GPKG-imported ones
             repo = SnoRepo(repo_path)
@@ -791,7 +773,6 @@ def test_feature_find_decode_performance(
     table,
     data_archive,
     data_imported,
-    geopackage,
     benchmark,
     request,
 ):
@@ -807,13 +788,12 @@ def test_feature_find_decode_performance(
     dataset = repo.datasets()["mytable"]
 
     with data_archive(archive) as data:
-        db = geopackage(f"{data / source_gpkg}")
-        dbcur = db.cursor()
-        num_rows = dbcur.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
-        pk_field = gpkg.pk(db, table)
-        pk = dbcur.execute(
-            f"SELECT {pk_field} FROM {table} ORDER BY {pk_field} LIMIT 1 OFFSET {min(97,num_rows-1)};"
-        ).fetchone()[0]
+        with gpkg_engine(data / source_gpkg).connect() as db:
+            num_rows = db.execute(f"SELECT COUNT(*) FROM {table};").fetchone()[0]
+            pk_field = gpkg.pk(db, table)
+            pk = db.execute(
+                f"SELECT {pk_field} FROM {table} ORDER BY {pk_field} LIMIT 1 OFFSET {min(97,num_rows-1)};"
+            ).fetchone()[0]
 
     if profile == "get_feature_by_pk":
         benchmark(dataset.get_feature, pk)
@@ -828,7 +808,7 @@ def test_feature_find_decode_performance(
 
 
 @pytest.mark.slow
-def test_import_multiple(data_archive, chdir, cli_runner, tmp_path, geopackage):
+def test_import_multiple(data_archive, chdir, cli_runner, tmp_path):
     repo_path = tmp_path / "data.sno"
     repo_path.mkdir()
 
@@ -856,7 +836,6 @@ def test_import_multiple(data_archive, chdir, cli_runner, tmp_path, geopackage):
                         repo_path,
                         table,
                         f"{data / source_gpkg}",
-                        geopackage,
                     )
                 )
 

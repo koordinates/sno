@@ -7,6 +7,7 @@ import pytest
 
 import sno
 from sno.diff_structs import Delta, DeltaDiff
+from sno.sqlalchemy import gpkg_engine
 from sno.geometry import hex_wkb_to_ogr
 from sno.repo import SnoRepo
 
@@ -30,7 +31,7 @@ def _check_html_output(s):
 
 
 @pytest.mark.parametrize("output_format", DIFF_OUTPUT_FORMATS)
-def test_diff_points(output_format, data_working_copy, geopackage, cli_runner):
+def test_diff_points(output_format, data_working_copy, cli_runner):
     """ diff the working copy against HEAD """
     with data_working_copy("points") as (repo, wc):
         # empty
@@ -40,20 +41,18 @@ def test_diff_points(output_format, data_working_copy, geopackage, cli_runner):
         assert r.exit_code == 0, r.stderr
 
         # make some changes
-        db = geopackage(wc)
-        with db:
-            cur = db.cursor()
+        with gpkg_engine(wc).connect() as db:
 
-            cur.execute(H.POINTS.INSERT, H.POINTS.RECORD)
-            assert db.changes() == 1
-            cur.execute(f"UPDATE {H.POINTS.LAYER} SET fid=9998 WHERE fid=1;")
-            assert db.changes() == 1
-            cur.execute(
+            r = db.execute(H.POINTS.INSERT, H.POINTS.RECORD)
+            assert r.rowcount == 1
+            r = db.execute(f"UPDATE {H.POINTS.LAYER} SET fid=9998 WHERE fid=1;")
+            assert r.rowcount == 1
+            r = db.execute(
                 f"UPDATE {H.POINTS.LAYER} SET name='test', t50_fid=NULL WHERE fid=2;"
             )
-            assert db.changes() == 1
-            cur.execute(f"DELETE FROM {H.POINTS.LAYER} WHERE fid=3;")
-            assert db.changes() == 1
+            assert r.rowcount == 1
+            r = db.execute(f"DELETE FROM {H.POINTS.LAYER} WHERE fid=3;")
+            assert r.rowcount == 1
 
         r = cli_runner.invoke(
             ["diff", f"--output-format={output_format}", "--output=-"]
@@ -259,17 +258,15 @@ def test_diff_points(output_format, data_working_copy, geopackage, cli_runner):
 
 
 @pytest.mark.parametrize("output_format", DIFF_OUTPUT_FORMATS)
-def test_diff_reprojection(output_format, data_working_copy, geopackage, cli_runner):
+def test_diff_reprojection(output_format, data_working_copy, cli_runner):
     """ diff the working copy against HEAD """
     with data_working_copy("points") as (repo, wc):
         # make some changes
-        db = geopackage(wc)
-        with db:
-            cur = db.cursor()
-            cur.execute(
+        with gpkg_engine(wc).connect() as db:
+            r = db.execute(
                 f"UPDATE {H.POINTS.LAYER} SET name='test', t50_fid=NULL WHERE fid=2;"
             )
-            assert db.changes() == 1
+            assert r.rowcount == 1
 
         r = cli_runner.invoke(
             [
@@ -335,7 +332,7 @@ def test_show_crs_with_aspatial_dataset(data_archive, cli_runner):
 
 
 @pytest.mark.parametrize("output_format", DIFF_OUTPUT_FORMATS)
-def test_diff_polygons(output_format, data_working_copy, geopackage, cli_runner):
+def test_diff_polygons(output_format, data_working_copy, cli_runner):
     """ diff the working copy against HEAD """
     with data_working_copy("polygons") as (repo, wc):
         # empty
@@ -345,20 +342,18 @@ def test_diff_polygons(output_format, data_working_copy, geopackage, cli_runner)
         assert r.exit_code == 0, r.stderr
 
         # make some changes
-        db = geopackage(wc)
-        with db:
-            cur = db.cursor()
+        with gpkg_engine(wc).connect() as db:
 
-            cur.execute(H.POLYGONS.INSERT, H.POLYGONS.RECORD)
-            assert db.changes() == 1
-            cur.execute(f"UPDATE {H.POLYGONS.LAYER} SET id=9998 WHERE id=1424927;")
-            assert db.changes() == 1
-            cur.execute(
+            r = db.execute(H.POLYGONS.INSERT, H.POLYGONS.RECORD)
+            assert r.rowcount == 1
+            r = db.execute(f"UPDATE {H.POLYGONS.LAYER} SET id=9998 WHERE id=1424927;")
+            assert r.rowcount == 1
+            r = db.execute(
                 f"UPDATE {H.POLYGONS.LAYER} SET survey_reference='test', date_adjusted='2019-01-01T00:00:00Z' WHERE id=1443053;"
             )
-            assert db.changes() == 1
-            cur.execute(f"DELETE FROM {H.POLYGONS.LAYER} WHERE id=1452332;")
-            assert db.changes() == 1
+            assert r.rowcount == 1
+            r = db.execute(f"DELETE FROM {H.POLYGONS.LAYER} WHERE id=1452332;")
+            assert r.rowcount == 1
 
         r = cli_runner.invoke(
             ["diff", f"--output-format={output_format}", "--output=-"]
@@ -670,7 +665,7 @@ def test_diff_polygons(output_format, data_working_copy, geopackage, cli_runner)
 
 
 @pytest.mark.parametrize("output_format", DIFF_OUTPUT_FORMATS)
-def test_diff_table(output_format, data_working_copy, geopackage, cli_runner):
+def test_diff_table(output_format, data_working_copy, cli_runner):
     """ diff the working copy against HEAD """
     with data_working_copy("table") as (repo, wc):
         # empty
@@ -680,20 +675,20 @@ def test_diff_table(output_format, data_working_copy, geopackage, cli_runner):
         assert r.exit_code == 0, r.stderr
 
         # make some changes
-        db = geopackage(wc)
-        with db:
-            cur = db.cursor()
+        with gpkg_engine(wc).connect() as db:
 
-            cur.execute(H.TABLE.INSERT, H.TABLE.RECORD)
-            assert db.changes() == 1
-            cur.execute(f'UPDATE {H.TABLE.LAYER} SET "OBJECTID"=9998 WHERE OBJECTID=1;')
-            assert db.changes() == 1
-            cur.execute(
+            r = db.execute(H.TABLE.INSERT, H.TABLE.RECORD)
+            assert r.rowcount == 1
+            r = db.execute(
+                f'UPDATE {H.TABLE.LAYER} SET "OBJECTID"=9998 WHERE OBJECTID=1;'
+            )
+            assert r.rowcount == 1
+            r = db.execute(
                 f"UPDATE {H.TABLE.LAYER} SET name='test', POP2000=9867 WHERE OBJECTID=2;"
             )
-            assert db.changes() == 1
-            cur.execute(f'DELETE FROM {H.TABLE.LAYER} WHERE "OBJECTID"=3;')
-            assert db.changes() == 1
+            assert r.rowcount == 1
+            r = db.execute(f'DELETE FROM {H.TABLE.LAYER} WHERE "OBJECTID"=3;')
+            assert r.rowcount == 1
 
         r = cli_runner.invoke(
             ["diff", f"--output-format={output_format}", "--output=-"]
@@ -1074,7 +1069,7 @@ def test_diff_rev_rev(head_sha, head1_sha, data_archive_readonly, cli_runner):
             assert not any(n[1] for n in change_names)
 
 
-def test_diff_rev_wc(data_working_copy, geopackage, cli_runner):
+def test_diff_rev_wc(data_working_copy, cli_runner):
     """ diff the working copy against commits """
     # ID  R0  ->  R1  ->  WC
     # 1   a       a1      a
@@ -1108,22 +1103,20 @@ def test_diff_rev_wc(data_working_copy, geopackage, cli_runner):
         # assert r.exit_code == 0, r
 
         # make the R1 -> WC changes
-        db = geopackage(wc)
-        with db:
-            cur = db.cursor()
+        with gpkg_engine(wc).connect() as db:
 
             EDITS = ((1, "a"), (3, "c1"), (4, "d2"), (8, "h1"))
             for pk, val in EDITS:
-                cur.execute("UPDATE editing SET value = ? WHERE id = ?;", (val, pk))
-                assert db.changes() == 1
+                r = db.execute("UPDATE editing SET value = ? WHERE id = ?;", (val, pk))
+                assert r.rowcount == 1
 
-            cur.execute("DELETE FROM editing WHERE id IN (5, 9);")
-            assert db.changes() == 2
+            r = db.execute("DELETE FROM editing WHERE id IN (5, 9);")
+            assert r.rowcount == 2
 
-            cur.execute(
+            r = db.execute(
                 "INSERT INTO editing (id, value) VALUES (6, 'f'), (11, 'k'), (12, 'l1');"
             )
-            assert db.changes() == 3
+            assert r.rowcount == 3
 
         def _extract(diff_json):
             ds = {}
@@ -1289,25 +1282,30 @@ def test_diff_object_eq_reverse():
     assert list(forward.values()) == [Delta(v1, v0) for v0, v1 in reverse.values()]
 
 
-def test_diff_3way(data_working_copy, geopackage, cli_runner, insert, request):
+def test_diff_3way(data_working_copy, cli_runner, insert, request):
     with data_working_copy("points") as (repo_path, wc):
+        engine = gpkg_engine(wc)
         repo = SnoRepo(repo_path)
+
         # new branch
         r = cli_runner.invoke(["checkout", "-b", "changes"])
         assert r.exit_code == 0, r.stderr
         assert repo.head.name == "refs/heads/changes"
 
         # make some changes
-        db = geopackage(wc)
-        insert(db)
-        insert(db)
-        b_commit_id = insert(db)
+        with engine.connect() as db:
+            insert(db)
+            insert(db)
+            b_commit_id = insert(db)
         assert repo.head.target.hex == b_commit_id
 
         r = cli_runner.invoke(["checkout", "master"])
         assert r.exit_code == 0, r.stderr
         assert repo.head.target.hex != b_commit_id
-        m_commit_id = insert(db)
+
+        with engine.connect() as db:
+            m_commit_id = insert(db)
+
         H.git_graph(request, "pre-merge-master")
 
         # Three dots diff should show both sets of changes.

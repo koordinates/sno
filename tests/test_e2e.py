@@ -3,6 +3,8 @@ import subprocess
 
 import pytest
 
+from sno.sqlalchemy import gpkg_engine
+
 
 H = pytest.helpers.helpers()
 
@@ -30,7 +32,6 @@ def test_e2e(
     tmp_path,
     chdir,
     cli_runner,
-    geopackage,
     insert,
     request,
 ):
@@ -71,8 +72,8 @@ def test_e2e(
             assert working_copy.exists()
 
             # check we have the right data in the WC
-            db = geopackage(str(working_copy))
-            assert H.row_count(db, table) == row_count
+            with gpkg_engine(working_copy).connect() as db:
+                assert H.row_count(db, table) == row_count
 
             # create & switch to a new branch
             r = cli_runner.invoke(["switch", "-c", "edit-1"])
@@ -84,7 +85,9 @@ def test_e2e(
             assert r.stdout.splitlines()[0] == "On branch edit-1"
 
             # make an edit
-            insert(db, commit=False)
+            with gpkg_engine(working_copy).connect() as db:
+                insert(db, commit=False)
+
             r = cli_runner.invoke(["diff"])
             assert r.exit_code == 0
             assert re.match(fr"\+\+\+ {table}:feature:\d+$", r.stdout.splitlines()[0])

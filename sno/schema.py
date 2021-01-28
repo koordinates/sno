@@ -211,6 +211,10 @@ class Schema:
         return self._columns
 
     @property
+    def column_names(self):
+        return [c.name for c in self._columns]
+
+    @property
     def legend(self):
         return self._legend
 

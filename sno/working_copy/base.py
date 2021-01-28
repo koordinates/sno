@@ -15,7 +15,6 @@ from sno.exceptions import (
     NO_WORKING_COPY,
 )
 from sno.filter_util import UNFILTERED
-from sno.repo_version import get_repo_version
 from sno.schema import Schema
 
 
@@ -212,6 +211,17 @@ class WorkingCopy:
             raise Mismatch(wc_tree_id, expected_tree_id)
         return wc_tree_id
 
+    def tracking_changes_count(self, dataset=None):
+        with self.session() as db:
+            if dataset is not None:
+                r = db.execute(
+                    f"SELECT COUNT(*) FROM {self.TRACKING_TABLE} WHERE table_name=:table_name;",
+                    {"table_name": dataset.table_name},
+                )
+            else:
+                r = db.execute(f"SELECT COUNT(*) FROM {self.TRACKING_TABLE}")
+            return r.scalar()
+
     def _chunk(self, iterable, size):
         """Generator. Yield successive chunks from iterable of length <size>."""
         it = iter(iterable)
@@ -250,18 +260,19 @@ class WorkingCopy:
         """
         repo_filter = repo_filter or UNFILTERED
 
-        repo_diff = RepoDiff()
-        for dataset in self.repo.datasets(self.get_db_tree()):
-            if dataset.path not in repo_filter:
-                continue
-            ds_diff = self.diff_db_to_tree(
-                dataset,
-                ds_filter=repo_filter[dataset.path],
-                raise_if_dirty=raise_if_dirty,
-            )
-            repo_diff[dataset.path] = ds_diff
-        repo_diff.prune()
-        return repo_diff
+        with self.session():
+            repo_diff = RepoDiff()
+            for dataset in self.repo.datasets(self.get_db_tree()):
+                if dataset.path not in repo_filter:
+                    continue
+                ds_diff = self.diff_db_to_tree(
+                    dataset,
+                    ds_filter=repo_filter[dataset.path],
+                    raise_if_dirty=raise_if_dirty,
+                )
+                repo_diff[dataset.path] = ds_diff
+            repo_diff.prune()
+            return repo_diff
 
     def diff_db_to_tree(self, dataset, ds_filter=None, raise_if_dirty=False):
         """
@@ -318,15 +329,14 @@ class WorkingCopy:
         find_renames = self.can_find_renames(meta_diff)
 
         with self.session() as db:
-            dbcur = db.cursor()
-            self._execute_diff_query(dbcur, dataset, feature_filter, meta_diff)
+            r = self._execute_dirty_rows_query(db, dataset, feature_filter, meta_diff)
 
             feature_diff = DeltaDiff()
             insert_count = delete_count = 0
 
             geom_col = dataset.geom_column_name
 
-            for row in dbcur:
+            for row in r:
                 track_pk = row[0]  # This is always a str
                 db_obj = {k: row[k] for k in row.keys() if k != ".__track_pk"}
 
@@ -366,17 +376,17 @@ class WorkingCopy:
 
         return feature_diff
 
-    def _execute_diff_query(self, dbcur, dataset, feature_filter):
+    def _execute_dirty_pks_query(self, db, dataset):
         """
-        Does a join on the tracking table and the table for the given dataset, such that the dbcursor's result
-        is all the rows that have been inserted / updated / deleted.
+        Queries the tracking table for the rows belonging to the given dataset, and returns a result
+        containing all the primary keys of all the rows that have been inserted / updated / deleted.
         """
         raise NotImplementedError()
 
-    def _execute_dirty_rows_query(self, dbcur, dataset):
+    def _execute_dirty_rows_query(self, db, dataset, feature_filter):
         """
-        Queries the tracking table for the rows belonging to the given dataset, such that the dbcursor's result
-        is the primary keys of all the rows that have been inserted / updated / deleted.
+        Does a join on the tracking table and the table for the given dataset, and returns a result
+        containing all the rows that have been inserted / updated / deleted.
         """
         raise NotImplementedError()
 
@@ -441,8 +451,7 @@ class WorkingCopy:
         tree_id = tree.id.hex if isinstance(tree, pygit2.Tree) else tree
         L.info(f"Tree sha: {tree_id}")
         with self.session() as db:
-            dbcur = db.cursor()
-            changes = self._update_state_table_tree_impl(dbcur, tree_id)
+            changes = self._update_state_table_tree_impl(db, tree_id)
         assert changes == 1, f"{self.STATE_TABLE} update: expected 1Δ, got {changes}"
 
     def _update_state_table_tree_impl(self, dbcur, tree_id):
@@ -559,7 +568,6 @@ class WorkingCopy:
             )
 
         with self.session(bulk=1) as db:
-            dbcur = db.cursor()
             # Delete old tables
             if table_deletes:
                 self.drop_table(
@@ -579,14 +587,14 @@ class WorkingCopy:
                 self._update_table(
                     base_ds,
                     target_ds,
-                    dbcur,
+                    db,
                     commit,
                     track_changes_as_dirty=track_changes_as_dirty,
                 )
 
             if not track_changes_as_dirty:
                 # update the tree id
-                self._update_state_table_tree_impl(dbcur, target_tree_id)
+                self._update_state_table_tree_impl(db, target_tree_id)
 
     def _filter_by_paths(self, datasets, paths):
         """Filters the datasets so that only those matching the paths are returned."""
@@ -596,7 +604,7 @@ class WorkingCopy:
             return datasets
 
     def _update_table(
-        self, base_ds, target_ds, dbcur, commit=None, track_changes_as_dirty=False
+        self, base_ds, target_ds, db, commit=None, track_changes_as_dirty=False
     ):
         """
         Update the given table in working copy from its current state to target_ds.
@@ -604,19 +612,19 @@ class WorkingCopy:
         and not have any unsupported meta changes - see _is_meta_update_supported.
         base_ds - the dataset that this working copy table is currently based on.
         target_ds - the target desired state for this working copy table.
-        dbcur - database cursor.
+        db - database.
         commit - the commit that contains target_ds, if any.
         track_changes_if_dirty - whether to track changes made from base_ds -> target_ds as WC edits.
         """
 
-        self._apply_meta_diff(base_ds, ~self.diff_db_to_tree_meta(base_ds), dbcur)
+        self._apply_meta_diff(base_ds, ~self.diff_db_to_tree_meta(base_ds), db)
         # WC now has base_ds structure and so we can write base_ds features to WC.
-        self._reset_dirty_rows(base_ds, dbcur)
+        self._reset_dirty_rows(base_ds, db)
 
         if target_ds != base_ds:
-            self._apply_meta_diff(target_ds, base_ds.diff_meta(target_ds), dbcur)
+            self._apply_meta_diff(target_ds, base_ds.diff_meta(target_ds), db)
             # WC now has target_ds structure and so we can write target_ds features to WC.
-            self._apply_feature_diff(base_ds, target_ds, dbcur, track_changes_as_dirty)
+            self._apply_feature_diff(base_ds, target_ds, db, track_changes_as_dirty)
 
     def _apply_feature_diff(
         self, base_ds, target_ds, dbcur, track_changes_as_dirty=False
@@ -676,13 +684,13 @@ class WorkingCopy:
         # Subclasses can override to support various types of meta updates.
         return not meta_diff
 
-    def _apply_meta_diff(self, target_ds, meta_diff, dbcur):
+    def _apply_meta_diff(self, target_ds, meta_diff, db):
         """
         Change the metadata of this working copy according to the given meta diff.
         Not all changes are possible or supported - see _is_meta_update_supported.
         target_ds - controls which table to update. May also be used to look up target CRS.
         meta_diff - a DeltaDiff object containing meta-item deltas for this dataset.
-        dbcur - database cursor.
+        db - database cursor.
         """
         L.debug("Meta diff: %s changes", len(meta_diff))
         for key in meta_diff:
@@ -692,37 +700,36 @@ class WorkingCopy:
             func_key = key.replace("/", "_").replace(".", "_")
             func = getattr(self, f"_apply_meta_{func_key}")
             delta = meta_diff[key]
-            func(target_ds, delta.old_value, delta.new_value, dbcur)
+            func(target_ds, delta.old_value, delta.new_value, db)
 
-    def _reset_dirty_rows(self, base_ds, dbcur):
+    def _reset_dirty_rows(self, base_ds, db):
         """
         Reset the dirty rows recorded in the tracking table to match the originals from the dataset.
         base_ds - the dataset this WC table is based on.
-        dbcur - database cursor.
+        db - database cursor.
         """
-        track_count = self._execute_dirty_rows_query(dbcur, base_ds)
-        dirty_pk_list = [r[0] for r in dbcur]
+        r = self._execute_dirty_pks_query(db, base_ds)
+        dirty_pk_list = [row[0] for row in r]
+        track_count = len(dirty_pk_list)
         if not dirty_pk_list:
             return
 
         # We're resetting the dirty rows so we don't track these changes in the tracking table.
-        with self._suspend_triggers(dbcur, base_ds):
+        with self._suspend_triggers(db, base_ds):
             # todo: suspend/remove spatial index
             L.debug("Cleaning up dirty rows...")
 
-            count = self.delete_features(dbcur, base_ds, dirty_pk_list)
+            count = self.delete_features(db, base_ds, dirty_pk_list)
             L.debug(
                 "_reset_dirty_rows(): removed %s features, tracking Δ count=%s",
                 count,
                 track_count,
             )
-            count = self.write_features(
-                dbcur, base_ds, dirty_pk_list, ignore_missing=True
-            )
+            count = self.write_features(db, base_ds, dirty_pk_list, ignore_missing=True)
             L.debug(
                 "_reset_dirty_rows(): wrote %s features, tracking Δ count=%s",
                 count,
                 track_count,
             )
 
-            self._reset_tracking_table_for_dataset(dbcur, base_ds)
+            self._reset_tracking_table_for_dataset(db, base_ds)

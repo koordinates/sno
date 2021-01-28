@@ -18,3 +18,9 @@ def gpkg_engine(path):
     engine = sqlalchemy.create_engine(f"sqlite:///{path}", module=sqlite)
     sqlalchemy.event.listen(engine, "connect", _on_connect)
     return engine
+
+
+def insert_command(table_name, col_names):
+    return sqlalchemy.table(
+        table_name, *[sqlalchemy.column(c) for c in col_names]
+    ).insert()

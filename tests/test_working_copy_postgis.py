@@ -150,15 +150,13 @@ def test_commit_edits(
             wc = repo.working_copy
             assert wc.is_created()
 
-            table_prefix = postgres_schema + "."
             with wc.session() as db:
-                dbcur = db.cursor()
                 if archive == "points":
-                    edit_points(dbcur, table_prefix)
+                    edit_points(db, postgres_schema)
                 elif archive == "polygons":
-                    edit_polygons(dbcur, table_prefix)
+                    edit_polygons(db, postgres_schema)
                 elif archive == "table":
-                    edit_table(dbcur, table_prefix)
+                    edit_table(db, postgres_schema)
 
             r = cli_runner.invoke(["status"])
             assert r.exit_code == 0, r.stderr
@@ -212,29 +210,21 @@ def test_edit_schema(data_archive, cli_runner, new_postgis_db_schema):
             assert r.exit_code == 0, r.stderr
 
             with wc.session() as db:
-                dbcur = db.cursor()
-                dbcur.execute(
-                    SQL("COMMENT ON TABLE {} IS 'New title';").format(
-                        Identifier(postgres_schema, H.POLYGONS.LAYER)
-                    )
+                db.execute(
+                    f"""COMMENT ON TABLE "{postgres_schema}"."{H.POLYGONS.LAYER}" IS 'New title';"""
                 )
-                dbcur.execute(
-                    SQL("ALTER TABLE {} ADD COLUMN colour VARCHAR(32);").format(
-                        Identifier(postgres_schema, H.POLYGONS.LAYER)
-                    )
+                db.execute(
+                    f"""ALTER TABLE "{postgres_schema}"."{H.POLYGONS.LAYER}" ADD COLUMN colour VARCHAR(32);"""
                 )
-                dbcur.execute(
-                    SQL("ALTER TABLE {} DROP COLUMN survey_reference;").format(
-                        Identifier(postgres_schema, H.POLYGONS.LAYER)
-                    )
+                db.execute(
+                    f"""ALTER TABLE "{postgres_schema}"."{H.POLYGONS.LAYER}" DROP COLUMN survey_reference;"""
                 )
-                dbcur.execute(
-                    SQL(
-                        """
-                        ALTER TABLE {} ALTER COLUMN geom TYPE geometry(MULTIPOLYGON, 3857)
-                        USING ST_SetSRID(geom, 3857);
+                db.execute(
+                    f"""
+                    ALTER TABLE "{postgres_schema}"."{H.POLYGONS.LAYER}" ALTER COLUMN geom
+                    TYPE geometry(MULTIPOLYGON, 3857)
+                    USING ST_SetSRID(geom, 3857);
                     """
-                    ).format(Identifier(postgres_schema, H.POLYGONS.LAYER))
                 )
 
             r = cli_runner.invoke(["diff"])
@@ -341,21 +331,18 @@ def test_edit_crs(data_archive, cli_runner, new_postgis_db_schema):
             with pytest.raises(SucceedAndRollback):
                 with wc.session() as db:
 
-                    dbcur = db.cursor()
-                    dbcur.execute(
-                        SQL("SELECT srtext FROM public.spatial_ref_sys WHERE srid=4326")
+                    r = db.execute(
+                        "SELECT srtext FROM public.spatial_ref_sys WHERE srid=4326"
                     )
-                    crs = dbcur.fetchone()[0]
+                    crs = r.scalar()
                     assert crs.startswith('GEOGCS["WGS 84",')
                     assert crs.endswith('AUTHORITY["EPSG","4326"]]')
 
                     # Make an unimportant, cosmetic change, while keeping the CRS basically EPSG:4326
                     crs = crs.replace('GEOGCS["WGS 84",', 'GEOGCS["WGS 1984",')
-                    dbcur.execute(
-                        SQL(
-                            "UPDATE public.spatial_ref_sys SET srtext=%s WHERE srid=4326;"
-                        ),
-                        (crs,),
+                    db.execute(
+                        """UPDATE public.spatial_ref_sys SET srtext=:srtext WHERE srid=4326;""",
+                        {"srtext": crs},
                     )
 
                     # sno diff hides differences between dataset CRS and WC CRS if they are both supposed to be EPSG:4326
@@ -367,11 +354,9 @@ def test_edit_crs(data_archive, cli_runner, new_postgis_db_schema):
                         'AUTHORITY["EPSG","4326"]]', 'AUTHORITY["CUSTOM","4326"]]'
                     )
 
-                    dbcur.execute(
-                        SQL(
-                            "UPDATE public.spatial_ref_sys SET srtext=%s WHERE srid=4326;"
-                        ),
-                        (crs,),
+                    db.execute(
+                        """UPDATE public.spatial_ref_sys SET srtext=:srtext WHERE srid=4326;""",
+                        {"srtext": crs},
                     )
 
                     # Now sno diff should show the change, and it is possible to commit the change.

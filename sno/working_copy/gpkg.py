@@ -13,7 +13,6 @@ from osgeo import gdal
 
 from .base import WorkingCopy
 from sno import gpkg, gpkg_adapter
-from sno.filter_util import UNFILTERED
 from sno.geometry import normalise_gpkg_geom
 from sno.schema import Schema
 from sno.sqlalchemy import gpkg_engine, insert_command
@@ -689,84 +688,6 @@ class WorkingCopy_GPKG(WorkingCopy):
                     f"""DELETE FROM {self.TRACKING_TABLE} WHERE table_name = :table_name;""",
                     {"table_name": table_name},
                 )
-
-    def _execute_dirty_pks_query(self, db, dataset):
-        return db.execute(
-            f"""SELECT pk FROM {self.TRACKING_TABLE} WHERE table_name = :table_name;""",
-            {"table_name": dataset.table_name},
-        )
-
-    def _execute_dirty_rows_query(
-        self, db, dataset, feature_filter=None, meta_diff=None
-    ):
-        feature_filter = feature_filter or UNFILTERED
-        table = dataset.table_name
-        if (
-            meta_diff
-            and "schema.json" in meta_diff
-            and meta_diff["schema.json"].new_value
-        ):
-            schema = Schema.from_column_dicts(meta_diff["schema.json"].new_value)
-        else:
-            schema = dataset.schema
-
-        pk_field = schema.pk_columns[0].name
-        col_names = ",".join([f"TAB.{gpkg.ident(col.name)}" for col in schema])
-
-        diff_sql = f"""
-            SELECT
-                TRA.pk AS ".__track_pk",
-                {col_names}
-            FROM {self.TRACKING_TABLE} TRA LEFT OUTER JOIN {gpkg.ident(table)} TAB
-            ON (TRA.pk = TAB.{gpkg.ident(pk_field)})
-            WHERE (TRA.table_name = :table_name)
-        """
-        params = {"table_name": table}
-
-        if feature_filter is not UNFILTERED:
-            diff_sql += " AND TRA.pk = :pk"
-            params = [{"table_name": table, "pk": str(pk)} for pk in feature_filter]
-        return db.execute(diff_sql, params)
-
-    def reset_tracking_table(self, reset_filter=UNFILTERED):
-        reset_filter = reset_filter or UNFILTERED
-
-        with self.session() as db:
-            if reset_filter == UNFILTERED:
-                db.execute(f"DELETE FROM {self.TRACKING_TABLE};")
-                return
-
-            for dataset_path, dataset_filter in reset_filter.items():
-                table = dataset_path.strip("/").replace("/", "__")
-                if (
-                    dataset_filter == UNFILTERED
-                    or dataset_filter.get("feature") == UNFILTERED
-                ):
-                    db.execute(
-                        f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=:table_name;",
-                        {"table_name": table},
-                    )
-                    continue
-
-                pks = dataset_filter.get("feature", ())
-                db.execute(
-                    f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=:table_name AND pk=:pk;",
-                    [{"table_name": table, "pk": str(pk)} for pk in pks],
-                )
-
-    def _reset_tracking_table_for_dataset(self, db, dataset):
-        r = db.execute(
-            f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=:table_name;",
-            {"table_name": dataset.table_name},
-        )
-        return r.rowcount
-
-    def _update_state_table_tree_impl(self, db, tree_id):
-        r = db.execute(
-            f"UPDATE {self.STATE_TABLE} SET value=:value WHERE table_name='*' AND key='tree';",
-            {"value": tree_id},
-        )
-        return r.rowcount
 
     def _is_meta_update_supported(self, dataset_version, meta_diff):
         """

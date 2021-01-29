@@ -58,16 +58,13 @@ def v2_schema_to_postgis_spec(schema, v2_obj):
     Generate the SQL CREATE TABLE spec from a V2 object eg:
     'fid INTEGER, geom GEOMETRY(POINT,2136), desc VARCHAR(128), PRIMARY KEY(fid)'
     """
-    result = [
-        SQL("{} {}").format(Identifier(col.name), SQL(v2_type_to_pg_type(col, v2_obj)))
-        for col in schema
-    ]
+    result = [f'"{col.name}" {v2_type_to_pg_type(col, v2_obj)}' for col in schema]
 
     if schema.pk_columns:
-        pk_col_names = (Identifier(col.name) for col in schema.pk_columns)
-        result.append(SQL("PRIMARY KEY({})").format(SQL(", ").join(pk_col_names)))
+        pk_col_names = ", ".join((f'"{col.name}"' for col in schema.pk_columns))
+        result.append(f"PRIMARY KEY({pk_col_names})")
 
-    return SQL(", ").join(result)
+    return ", ".join(result)
 
 
 def v2_type_to_pg_type(column_schema, v2_obj):

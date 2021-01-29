@@ -381,22 +381,92 @@ class WorkingCopy:
         Queries the tracking table for the rows belonging to the given dataset, and returns a result
         containing all the primary keys of all the rows that have been inserted / updated / deleted.
         """
-        raise NotImplementedError()
+        return db.execute(
+            f"""SELECT pk FROM {self.TRACKING_TABLE} WHERE table_name = :table_name;""",
+            {"table_name": dataset.table_name},
+        )
 
-    def _execute_dirty_rows_query(self, db, dataset, feature_filter):
+    def _execute_dirty_rows_query(
+        self, db, dataset, feature_filter=None, meta_diff=None
+    ):
         """
         Does a join on the tracking table and the table for the given dataset, and returns a result
         containing all the rows that have been inserted / updated / deleted.
         """
-        raise NotImplementedError()
+        # TODO - use sqlalchemy, move this if-block.
+        if hasattr(self, "schema"):
+            table_identifier = f'"{self.schema}"."{dataset.table_name}"'
+            cast = "::text"
+        else:
+            table_identifier = f'"{dataset.table_name}"'
+            cast = ""
+
+        feature_filter = feature_filter or UNFILTERED
+
+        if (
+            meta_diff
+            and "schema.json" in meta_diff
+            and meta_diff["schema.json"].new_value
+        ):
+            schema = Schema.from_column_dicts(meta_diff["schema.json"].new_value)
+        else:
+            schema = dataset.schema
+
+        pk_field = schema.pk_columns[0].name
+        col_names = ",".join([f'TAB."{col.name}"' for col in schema])
+
+        diff_sql = f"""
+            SELECT
+                TRA.pk AS ".__track_pk",
+                {col_names}
+            FROM {self.TRACKING_TABLE} TRA LEFT OUTER JOIN {table_identifier} TAB
+            ON (TRA.pk = TAB."{pk_field}"{cast})
+            WHERE (TRA.table_name = :table_name)
+        """
+        params = {"table_name": dataset.table_name}
+
+        if feature_filter is not UNFILTERED:
+            diff_sql += " AND TRA.pk = :pk"
+            params = [
+                {"table_name": dataset.table_name, "pk": str(pk)}
+                for pk in feature_filter
+            ]
+        return db.execute(diff_sql, params)
 
     def reset_tracking_table(self, reset_filter=UNFILTERED):
         """Delete the rows from the tracking table that match the given filter."""
-        raise NotImplementedError()
+        reset_filter = reset_filter or UNFILTERED
 
-    def _reset_tracking_table_for_dataset(self, dbcur, dataset):
+        with self.session() as db:
+            if reset_filter == UNFILTERED:
+                db.execute(f"DELETE FROM {self.TRACKING_TABLE};")
+                return
+
+            for dataset_path, dataset_filter in reset_filter.items():
+                table = dataset_path.strip("/").replace("/", "__")
+                if (
+                    dataset_filter == UNFILTERED
+                    or dataset_filter.get("feature") == UNFILTERED
+                ):
+                    db.execute(
+                        f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=:table_name;",
+                        {"table_name": table},
+                    )
+                    continue
+
+                pks = dataset_filter.get("feature", ())
+                db.execute(
+                    f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=:table_name AND pk=:pk;",
+                    [{"table_name": table, "pk": str(pk)} for pk in pks],
+                )
+
+    def _reset_tracking_table_for_dataset(self, db, dataset):
         """Delete the rows from the tracking table that match the given dataset."""
-        raise NotImplementedError()
+        r = db.execute(
+            f"DELETE FROM {self.TRACKING_TABLE} WHERE table_name=:table_name;",
+            {"table_name": dataset.table_name},
+        )
+        return r.rowcount
 
     def _db_geom_to_gpkg_geom(self, g):
         """Convert a geometry as returned by the database to a sno geometry.Geometry object."""
@@ -454,12 +524,16 @@ class WorkingCopy:
             changes = self._update_state_table_tree_impl(db, tree_id)
         assert changes == 1, f"{self.STATE_TABLE} update: expected 1Δ, got {changes}"
 
-    def _update_state_table_tree_impl(self, dbcur, tree_id):
+    def _update_state_table_tree_impl(self, db, tree_id):
         """
         Write the given tree ID to the state table.
         tree_id - str, the hex SHA of the tree at HEAD.
         """
-        raise NotImplementedError()
+        r = db.execute(
+            f"UPDATE {self.STATE_TABLE} SET value=:value WHERE table_name='*' AND key='tree';",
+            {"value": tree_id},
+        )
+        return r.rowcount
 
     def reset(
         self,

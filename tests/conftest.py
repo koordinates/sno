@@ -20,7 +20,7 @@ import click
 from click.testing import CliRunner
 from sno.geometry import Geometry
 from sno.repo import SnoRepo
-from sno.sqlalchemy import gpkg_engine
+from sno.sqlalchemy import gpkg_engine, insert_command
 from sno.working_copy import WorkingCopy
 
 import pygit2
@@ -746,18 +746,20 @@ def _portable_insert(insert_sql, table_prefix, db):
     return insert_sql
 
 
-def _edit_points(db, table_prefix=""):
+def _edit_points(db, schema=None):
     H = pytest.helpers.helpers()
-    layer = table_prefix + H.POINTS.LAYER
-    # TODO: Fix this to use only sqlalchemy
-    r = db.execute(_portable_insert(H.POINTS.INSERT, table_prefix, db), H.POINTS.RECORD)
-    assert (r or db).rowcount == 1
+    layer = f'"{schema}"."{H.POINTS.LAYER}"' if schema else H.POINTS.LAYER
+    r = db.execute(
+        insert_command(H.POINTS.LAYER, H.POINTS.RECORD.keys(), schema=schema),
+        H.POINTS.RECORD,
+    )
+    assert r.rowcount == 1
     r = db.execute(f"UPDATE {layer} SET fid=9998 WHERE fid=1;")
-    assert (r or db).rowcount == 1
+    assert r.rowcount == 1
     r = db.execute(f"UPDATE {layer} SET name='test' WHERE fid=2;")
-    assert (r or db).rowcount == 1
+    assert r.rowcount == 1
     r = db.execute(f"DELETE FROM {layer} WHERE fid IN (3,30,31,32,33);")
-    assert (r or db).rowcount == 5
+    assert r.rowcount == 5
     pk_del = 3
     return pk_del
 
@@ -767,22 +769,22 @@ def edit_points():
     return _edit_points
 
 
-def _edit_polygons(db, table_prefix=""):
+def _edit_polygons(db, schema=None):
     H = pytest.helpers.helpers()
-    layer = table_prefix + H.POLYGONS.LAYER
-    # TODO: Fix this to use only sqlalchemy
+    layer = f'"{schema}"."{H.POLYGONS.LAYER}"' if schema else H.POLYGONS.LAYER
     r = db.execute(
-        _portable_insert(H.POLYGONS.INSERT, table_prefix, db), H.POLYGONS.RECORD
+        insert_command(H.POLYGONS.LAYER, H.POLYGONS.RECORD.keys(), schema=schema),
+        H.POLYGONS.RECORD,
     )
-    assert (r or db).rowcount == 1
+    assert r.rowcount == 1
     r = db.execute(f"UPDATE {layer} SET id=9998 WHERE id=1424927;")
-    assert (r or db).rowcount == 1
+    assert r.rowcount == 1
     r = db.execute(f"UPDATE {layer} SET survey_reference='test' WHERE id=1443053;")
-    assert (r or db).rowcount == 1
+    assert r.rowcount == 1
     r = db.execute(
         f"DELETE FROM {layer} WHERE id IN (1452332, 1456853, 1456912, 1457297, 1457355);"
     )
-    assert (r or db).rowcount == 5
+    assert r.rowcount == 5
     pk_del = 1452332
     return pk_del
 
@@ -792,18 +794,20 @@ def edit_polygons():
     return _edit_polygons
 
 
-def _edit_table(db, table_prefix=""):
+def _edit_table(db, schema=None):
     H = pytest.helpers.helpers()
-    layer = table_prefix + H.TABLE.LAYER
-    # TODO: Fix this to use only sqlalchemy
-    r = db.execute(_portable_insert(H.TABLE.INSERT, table_prefix, db), H.TABLE.RECORD)
-    assert (r or db).rowcount == 1
+    layer = f'"{schema}"."{H.TABLE.LAYER}"' if schema else H.TABLE.LAYER
+    r = db.execute(
+        insert_command(H.TABLE.LAYER, H.TABLE.RECORD.keys(), schema=schema),
+        H.TABLE.RECORD,
+    )
+    assert r.rowcount == 1
     r = db.execute(f"""UPDATE {layer} SET "OBJECTID"=9998 WHERE "OBJECTID"=1;""")
-    assert (r or db).rowcount == 1
+    assert r.rowcount == 1
     r = db.execute(f"""UPDATE {layer} SET "NAME"='test' WHERE "OBJECTID"=2;""")
-    assert (r or db).rowcount == 1
+    assert r.rowcount == 1
     r = db.execute(f"""DELETE FROM {layer} WHERE "OBJECTID" IN (3,30,31,32,33);""")
-    assert (r or db).rowcount == 5
+    assert r.rowcount == 5
     pk_del = 3
     return pk_del
 
